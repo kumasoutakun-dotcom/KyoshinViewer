@@ -1,0 +1,36 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Local backups and temporary source copies
+/source_backups/
+/MainActivity_before_*.kt
+/*_before_*.kt
+/MainActivity_current.txt
+/MainActivity_source_utf8.txt
+/CsvRecorder_before_*.kt
+
+# Downloaded archives
+*.zip
+
+# Kotlin and IDE local files
+/.kotlin/
+
+# Backup files
+*.bak
+*.tmp
+
+# Android Studio local settings
+.idea/

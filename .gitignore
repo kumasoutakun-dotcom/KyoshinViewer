@@ -34,3 +34,6 @@ local.properties
 
 # Android Studio local settings
 .idea/
+
+# Generated release APKs
+/app/release/

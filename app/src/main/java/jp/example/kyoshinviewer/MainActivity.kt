@@ -42,6 +42,7 @@ import jp.example.kyoshinviewer.ui.IntensityHistoryBandView
 import jp.example.kyoshinviewer.ui.WaveformView
 import java.io.File
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 
 class MainActivity : AppCompatActivity() {
 
@@ -85,7 +86,23 @@ class MainActivity : AppCompatActivity() {
 
     @Volatile
     private var lastUiUpdateNanos = 0L
+    @Volatile private var lastHistoryUiUpdateNanos = 0L
+    @Volatile private var lastSlowUiUpdateNanos = 0L
+    private val oneSecondMaxGalBits = AtomicLong(java.lang.Double.doubleToRawLongBits(0.0))
 
+    private fun accumulateOneSecondMaxGal(value: Double) {
+        if (!value.isFinite() || value <= 0.0) return
+
+        val newBits = java.lang.Double.doubleToRawLongBits(value)
+
+        while (true) {
+            val oldBits = oneSecondMaxGalBits.get()
+            val oldValue = java.lang.Double.longBitsToDouble(oldBits)
+
+            if (value <= oldValue) return
+            if (oneSecondMaxGalBits.compareAndSet(oldBits, newBits)) return
+        }
+    }
     private val monitorPageSource: MonitorPageSource = KwatchWebPageSource()
 
     private val createCsvDocument =
@@ -149,6 +166,14 @@ class MainActivity : AppCompatActivity() {
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ))
         }
+
+        page.addView(text("出典: KyoshinShindoColorMap / ingen084氏", 9f).apply {
+            setTextColor(Color.LTGRAY)
+            setPadding(dp(16), dp(2), dp(16), dp(4))
+        }, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
 
         webView = WebView(this).apply {
             settings.javaScriptEnabled = true
@@ -255,13 +280,50 @@ class MainActivity : AppCompatActivity() {
                 val stats = calibrationMonitor.push(
                     sample.axGal, sample.ayGal, sample.azGal
                 )
+                accumulateOneSecondMaxGal(sample.combinedGal)
+                val timestampNanos = sample.timestampNanos
+
+                // 数値表示：最大30Hz
                 if (lastUiUpdateNanos == 0L ||
-                    sample.timestampNanos - lastUiUpdateNanos >= 200_000_000L
+                    timestampNanos - lastUiUpdateNanos >= 33_333_333L
                 ) {
-                    lastUiUpdateNanos = sample.timestampNanos
+                    lastUiUpdateNanos = timestampNanos
                     if (!isDestroyed) {
                         handler.post {
-                            if (!isDestroyed) updateMeasurementDisplay(sample, stats)
+                            if (!isDestroyed) updateMeasurementNumbers(sample)
+                        }
+                    }
+                }
+
+                // 履歴帯・XYZ波形：最大10Hz
+                if (lastHistoryUiUpdateNanos == 0L ||
+                    timestampNanos - lastHistoryUiUpdateNanos >= 100_000_000L
+                ) {
+                    lastHistoryUiUpdateNanos = timestampNanos
+                    if (!isDestroyed) {
+                        handler.post {
+                            if (!isDestroyed) updateMeasurementHistory(sample)
+                        }
+                    }
+                }
+
+                // 階級バッジ・色バー：最大1Hz
+                if (lastSlowUiUpdateNanos == 0L ||
+                    timestampNanos - lastSlowUiUpdateNanos >= 1_000_000_000L
+                ) {
+                    lastSlowUiUpdateNanos = timestampNanos
+
+                    val pgaWindowMax = java.lang.Double.longBitsToDouble(
+                        oneSecondMaxGalBits.getAndSet(
+                            java.lang.Double.doubleToRawLongBits(0.0)
+                        )
+                    )
+
+                    if (!isDestroyed) {
+                        handler.post {
+                            if (!isDestroyed) {
+                                updateMeasurementSlow(sample, stats, pgaWindowMax)
+                            }
                         }
                     }
                 }
@@ -346,7 +408,7 @@ class MainActivity : AppCompatActivity() {
         historyArea.addView(label("震度履歴"))
 
         historyBand = IntensityHistoryBandView(this).apply {
-            setCapacity(36)
+            setCapacity(100)
         }
         historyArea.addView(historyBand, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, dp(28)
@@ -410,7 +472,7 @@ class MainActivity : AppCompatActivity() {
         waveArea.addView(label("XYZ 加速度波形（フィルタ後 / gal）"))
 
         waveformView = WaveformView(this).apply {
-            setCapacity(120)
+            setCapacity(100)
             setSeparatedSeries(true)
         }
         waveArea.addView(waveformView, LinearLayout.LayoutParams(
@@ -525,6 +587,9 @@ class MainActivity : AppCompatActivity() {
             return
         }
         lastUiUpdateNanos = 0L
+        lastHistoryUiUpdateNanos = 0L
+        lastSlowUiUpdateNanos = 0L
+        oneSecondMaxGalBits.set(java.lang.Double.doubleToRawLongBits(0.0))
         calibrationMonitor.reset()
         val started = measurementEngine.start()
         if (started) {
@@ -535,7 +600,6 @@ class MainActivity : AppCompatActivity() {
             sensorStatusText.text = "センサーの開始に失敗しました"
         }
     }
-
     private fun stopMeasurement() {
         measurementEngine.stop()
 
@@ -549,61 +613,150 @@ class MainActivity : AppCompatActivity() {
 
         isMeasuring = false
         lastUiUpdateNanos = 0L
-        sensorStatusText.text = "停止中"
-        measureButton.text = "計測開始"
+        lastHistoryUiUpdateNanos = 0L
+        lastSlowUiUpdateNanos = 0L
+        oneSecondMaxGalBits.set(java.lang.Double.doubleToRawLongBits(0.0))
+
+        resetMeasurementDisplay()
+    }
+
+    private fun resetMeasurementDisplay() {
+        sensorStatusText.text = "\u505C\u6B62\u4E2D"
+        measureButton.text = "\u8A08\u6E2C\u958B\u59CB"
         intensityText.text = "--.-"
         intensityClassText.text = "--"
         pgaText.text = "--.- gal"
-        sampleRateText.text = "サンプル: -- Hz"
-        calibrationText.text = "静止時ノイズ: --"
+        sampleRateText.text = "\u30B5\u30F3\u30D7\u30EB: -- Hz"
+        calibrationText.text = "\u9759\u6B62\u6642\u30CE\u30A4\u30BA: --"
         intensityColorBar.setColor(Color.GRAY)
         accelerationColorBar.setColor(Color.GRAY)
         historyBand.clear()
         waveformView.clearAll()
     }
 
-    private fun updateMeasurementDisplay(
-        sample: ProcessedSample,
-        stats: CalibrationMonitor.Stats
-    ) {
+    // 30Hz：リアルタイム数値
+    private fun updateMeasurementNumbers(sample: ProcessedSample) {
         if (!isMeasuring) return
-        val cls = IntensityClass.fromRawIntensity(sample.rawIntensity)
-        val colors = IntensityClassColors.colorsFor(cls)
 
         intensityText.text = if (sample.rawIntensity.isFinite()) {
             String.format(Locale.US, "%.2f", sample.rawIntensity)
-        } else "--.-"
+        } else "--"
+
+        pgaText.text = if (sample.combinedGal.isFinite()) {
+            String.format(Locale.US, "%.2f gal", sample.combinedGal)
+        } else "--.-- gal"
+    }
+
+    // 10Hz：震度履歴とXYZ波形
+    private fun updateMeasurementHistory(sample: ProcessedSample) {
+        if (!isMeasuring) return
+
+        val cls = IntensityClass.fromRawIntensity(sample.rawIntensity)
+        historyBand.push(cls)
+
+        waveformView.pushValue("X", sample.filteredXGal.toFloat(), Color.RED)
+        waveformView.pushValue("Y", sample.filteredYGal.toFloat(), Color.GREEN)
+        waveformView.pushValue("Z", sample.filteredZGal.toFloat(), Color.BLUE)
+    }
+
+    // 1Hz：階級バッジと色バー
+    private fun updateMeasurementSlow(
+        sample: ProcessedSample,
+        stats: CalibrationMonitor.Stats,
+        pgaWindowMaxGal: Double
+    ) {
+        if (!isMeasuring) return
+
+        val cls = IntensityClass.fromRawIntensity(sample.rawIntensity)
+        val colors = IntensityClassColors.colorsFor(cls)
 
         intensityClassText.text = "震度 ${cls.label}"
         intensityClassText.setTextColor(colors.text)
-        intensityClassText.background = roundedBackground(colors.background, dp(7))
-
-        historyBand.push(cls)
+        intensityClassText.background = android.graphics.drawable.GradientDrawable().apply {
+            setColor(colors.background)
+            cornerRadius = dp(7).toFloat()
+            setStroke(dp(2), colors.border)
+        }
 
         intensityColorBar.setColor(
             KyoshinShindoColorMap.colorForIntensity(sample.rawIntensity)
         )
 
-        pgaText.text = if (sample.combinedGal.isFinite()) {
-            String.format(Locale.US, "%.1f gal", sample.combinedGal)
-        } else "--.- gal"
-
         accelerationColorBar.setColor(
-            KyoshinShindoColorMap.colorForPga(sample.combinedGal)
+            KyoshinShindoColorMap.colorForPga(pgaWindowMaxGal)
         )
+
         sampleRateText.text = String.format(
             Locale.US, "サンプル: %.1f Hz", sample.sampleRateHz
         )
+
         calibrationText.text = String.format(
             Locale.US,
             "静止時ノイズ目安 SD X/Y/Z: %.2f / %.2f / %.2f gal",
             stats.sdX, stats.sdY, stats.sdZ
         )
-
-        waveformView.pushValue("X", sample.filteredXGal.toFloat(), Color.rgb(80, 170, 255))
-        waveformView.pushValue("Y", sample.filteredYGal.toFloat(), Color.rgb(255, 105, 105))
-        waveformView.pushValue("Z", sample.filteredZGal.toFloat(), Color.rgb(110, 220, 150))
     }
+// CSV再生：30Hz・リアルタイム数値
+    private fun updatePlaybackNumbers(
+    combinedGal: Double,
+    rawIntensity: Double
+) {
+    intensityText.text = if (rawIntensity.isFinite()) {
+        String.format(Locale.US, "%.2f", rawIntensity)
+    } else "--"
+
+    pgaText.text = if (combinedGal.isFinite()) {
+        String.format(Locale.US, "%.2f gal", combinedGal)
+    } else "--.-- gal"
+}
+
+// CSV再生：10Hz・震度履歴とXYZ波形
+    private fun updatePlaybackHistory(
+    rawIntensity: Double,
+    xGal: Double,
+    yGal: Double,
+    zGal: Double
+) {
+    val cls = IntensityClass.fromRawIntensity(rawIntensity)
+    historyBand.push(cls)
+
+    waveformView.pushValue("X", xGal.toFloat(), Color.RED)
+    waveformView.pushValue("Y", yGal.toFloat(), Color.GREEN)
+    waveformView.pushValue("Z", zGal.toFloat(), Color.BLUE)
+}
+
+// CSV再生：1Hz・階級バッジと色バー
+    private fun updatePlaybackSlow(
+    rawIntensity: Double,
+    pgaWindowMaxGal: Double,
+    sampleRateHz: Double
+) {
+    val cls = IntensityClass.fromRawIntensity(rawIntensity)
+    val colors = IntensityClassColors.colorsFor(cls)
+
+    intensityClassText.text = "震度 ${cls.label}"
+    intensityClassText.setTextColor(colors.text)
+    intensityClassText.background = android.graphics.drawable.GradientDrawable().apply {
+        setColor(colors.background)
+        cornerRadius = dp(7).toFloat()
+        setStroke(dp(2), colors.border)
+    }
+
+    intensityColorBar.setColor(
+        KyoshinShindoColorMap.colorForIntensity(rawIntensity)
+    )
+
+    accelerationColorBar.setColor(
+        KyoshinShindoColorMap.colorForPga(pgaWindowMaxGal)
+    )
+
+    sampleRateText.text = String.format(
+        Locale.US, "サンプル: %.1f Hz", sampleRateHz
+    )
+
+    calibrationText.text = "CSV再生データ"
+}
+
 private fun updateAutomaticRecording(sample: ProcessedSample) {
     // 直近5秒分をリングバッファに保持
     preTriggerBuffer.addLast(sample)
@@ -896,10 +1049,18 @@ private fun updateAutomaticRecording(sample: ProcessedSample) {
             .create()
 
         playbackDialog = dialog
+        // 再生開始時に観測カードを初期化
+        resetMeasurementDisplay()
+        sensorStatusText.text = "CSV再生中"
 
         val startNanos = SystemClock.elapsedRealtimeNanos()
         val totalNanos = data.samples.last().relativeNanos
+
         var sampleIndex = 0
+        var lastNumberUpdateNanos = -1L
+        var lastHistoryUpdateNanos = -1L
+        var lastSlowUpdateNanos = -1L
+        var pgaWindowMaxGal = 0.0
 
         val runnable = object : Runnable {
             override fun run() {
@@ -910,23 +1071,89 @@ private fun updateAutomaticRecording(sample: ProcessedSample) {
                 val elapsedNanos =
                     SystemClock.elapsedRealtimeNanos() - startNanos
 
+                var latestSample: CsvRecorder.PlaybackSample? = null
+
+                // 再生時刻までに到達したサンプルをすべて処理
                 while (
                     sampleIndex < data.samples.size &&
                     data.samples[sampleIndex].relativeNanos <= elapsedNanos
                 ) {
                     val sample = data.samples[sampleIndex]
 
-                    playbackWave.pushValue(
-                        "X", sample.xGal.toFloat(), Color.RED
-                    )
-                    playbackWave.pushValue(
-                        "Y", sample.yGal.toFloat(), Color.GREEN
-                    )
-                    playbackWave.pushValue(
-                        "Z", sample.zGal.toFloat(), Color.CYAN
+                    val combinedGal = kotlin.math.sqrt(
+                        sample.xGal * sample.xGal +
+                        sample.yGal * sample.yGal +
+                        sample.zGal * sample.zGal
                     )
 
+                    if (combinedGal.isFinite() && combinedGal > pgaWindowMaxGal) {
+                        pgaWindowMaxGal = combinedGal
+                    }
+
+                    latestSample = sample
                     sampleIndex++
+                }
+
+                val sample = latestSample
+
+                if (sample != null) {
+                    val combinedGal = kotlin.math.sqrt(
+                        sample.xGal * sample.xGal +
+                        sample.yGal * sample.yGal +
+                        sample.zGal * sample.zGal
+                    )
+
+                    val playbackIntensity = if (
+                        combinedGal.isFinite() && combinedGal > 0.0
+                    ) {
+                        2.0 * kotlin.math.log10(combinedGal) + 0.94
+                    } else {
+                        0.0
+                    }
+
+                    // 数値表示：最大30Hz
+                    if (
+                        lastNumberUpdateNanos < 0L ||
+                        elapsedNanos - lastNumberUpdateNanos >= 33_333_333L
+                    ) {
+                        lastNumberUpdateNanos = elapsedNanos
+                        updatePlaybackNumbers(combinedGal, playbackIntensity)
+                    }
+
+                    // 履歴・波形：最大10Hz
+                    if (
+                        lastHistoryUpdateNanos < 0L ||
+                        elapsedNanos - lastHistoryUpdateNanos >= 100_000_000L
+                    ) {
+                        lastHistoryUpdateNanos = elapsedNanos
+
+                        updatePlaybackHistory(
+                            playbackIntensity,
+                            sample.xGal,
+                            sample.yGal,
+                            sample.zGal
+                        )
+
+                        playbackWave.pushValue("X", sample.xGal.toFloat(), Color.RED)
+                        playbackWave.pushValue("Y", sample.yGal.toFloat(), Color.GREEN)
+                        playbackWave.pushValue("Z", sample.zGal.toFloat(), Color.BLUE)
+                    }
+
+                    // 階級バッジ・色バー：最大1Hz
+                    if (
+                        lastSlowUpdateNanos < 0L ||
+                        elapsedNanos - lastSlowUpdateNanos >= 1_000_000_000L
+                    ) {
+                        lastSlowUpdateNanos = elapsedNanos
+
+                        updatePlaybackSlow(
+                            playbackIntensity,
+                            pgaWindowMaxGal,
+                            data.sampleRateHz
+                        )
+
+                        pgaWindowMaxGal = 0.0
+                    }
                 }
 
                 val currentSeconds = elapsedNanos / 1_000_000_000.0
@@ -934,7 +1161,7 @@ private fun updateAutomaticRecording(sample: ProcessedSample) {
 
                 progressText.text = String.format(
                     Locale.US,
-                    "%.1f / %.1f 秒    %.1f Hz",
+                    "%.1f / %.1f 秒   %.1f Hz",
                     currentSeconds.coerceAtMost(totalSeconds),
                     totalSeconds,
                     data.sampleRateHz
@@ -946,7 +1173,7 @@ private fun updateAutomaticRecording(sample: ProcessedSample) {
                     return
                 }
 
-                handler.postDelayed(this, 50L)
+                handler.postDelayed(this, 16L)
             }
         }
 
@@ -966,7 +1193,7 @@ private fun updateAutomaticRecording(sample: ProcessedSample) {
         handler.post(runnable)
     }
 
-    private fun stopPlayback() {
+        private fun stopPlayback() {
         playbackRunnable?.let {
             handler.removeCallbacks(it)
         }
@@ -978,6 +1205,7 @@ private fun updateAutomaticRecording(sample: ProcessedSample) {
             }
         }
         playbackDialog = null
+        resetMeasurementDisplay()
     }
     private fun showMessage(message: String) {
         if (!isFinishing && !isDestroyed) {

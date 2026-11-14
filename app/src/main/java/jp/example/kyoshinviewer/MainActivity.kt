@@ -1,4 +1,4 @@
-package jp.example.kyoshinviewer
+﻿package jp.example.kyoshinviewer
 
 import android.annotation.SuppressLint
 import android.app.AlertDialog
@@ -63,6 +63,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var intensityColorBar: IntensityColorBarView
     private lateinit var accelerationColorBar: IntensityColorBarView
     private lateinit var waveformView: WaveformView
+
+    private var drawerOpen = false
+    private lateinit var drawerPanel: LinearLayout
+    private lateinit var drawerScrim: View
+    private lateinit var drawerToggleButton: View
+
+    private val appTypeface by lazy {
+        resources.getFont(R.font.gen_zen_gothic_kaic)
+    }
 
     private val handler = Handler(Looper.getMainLooper())
     private val recorderLock = Any()
@@ -221,11 +230,6 @@ class MainActivity : AppCompatActivity() {
             LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
         ))
 
-        page.addView(createBottomPanel(), LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ))
-
         val scrollView = ScrollView(this).apply {
             isFillViewport = true
             isVerticalScrollBarEnabled = true
@@ -239,6 +243,92 @@ class MainActivity : AppCompatActivity() {
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT
         ))
+
+        // サイドバーの背景
+        drawerScrim = View(this).apply {
+            setBackgroundColor(Color.argb(150, 0, 0, 0))
+            visibility = View.GONE
+            setOnClickListener { setDrawerOpen(false) }
+        }
+        outer.addView(drawerScrim, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        ))
+
+        // 右側の操作パネル
+        val drawerWidth = minOf(
+            dp(360),
+            (resources.displayMetrics.widthPixels * 0.85f).toInt()
+        )
+
+        drawerPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.rgb(18, 27, 40))
+            elevation = dp(12).toFloat()
+        }
+
+        val drawerHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(8), dp(8), dp(8))
+        }
+
+        drawerHeader.addView(text("操作・センサー", 16f, true),
+            LinearLayout.LayoutParams(0, dp(48), 1f))
+
+        drawerHeader.addView(Button(this).apply {
+            typeface = appTypeface
+            text = "閉じる"
+            setOnClickListener { setDrawerOpen(false) }
+        }, LinearLayout.LayoutParams(
+            dp(88), dp(42)
+        ))
+
+        drawerPanel.addView(drawerHeader)
+        drawerPanel.addView(createBottomPanel())
+
+        outer.addView(drawerPanel, FrameLayout.LayoutParams(
+            drawerWidth,
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            Gravity.END
+        ))
+
+        drawerPanel.translationX = drawerWidth.toFloat()
+
+        // 画面右下の操作ボタン
+        drawerToggleButton = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.rgb(35, 48, 65))
+                cornerRadius = dp(28).toFloat()
+            }
+            elevation = dp(8).toFloat()
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { setDrawerOpen(true) }
+
+            repeat(3) {
+                addView(View(this@MainActivity).apply {
+                    setBackgroundColor(Color.WHITE)
+                }, LinearLayout.LayoutParams(
+                    dp(26),
+                    dp(2)
+                ).apply {
+                    if (it != 2) bottomMargin = dp(5)
+                })
+            }
+        }
+
+        outer.addView(drawerToggleButton, FrameLayout.LayoutParams(
+            dp(56),
+            dp(56),
+            Gravity.BOTTOM or Gravity.END
+        ).apply {
+            rightMargin = dp(16)
+            bottomMargin = dp(18)
+        })
 
         errorLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -393,6 +483,8 @@ class MainActivity : AppCompatActivity() {
 
         intensityClassText = text("--", 32f, true).apply {
             gravity = Gravity.CENTER
+            includeFontPadding = false
+            setPadding(0, 0, 0, dp(4))
             setTextColor(Color.WHITE)
             background = roundedBackground(Color.rgb(100, 130, 170), dp(7))
         }
@@ -429,7 +521,7 @@ class MainActivity : AppCompatActivity() {
         // 下段：左に計測値、右にXYZ波形
         val bottomRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(8), 0, 0)
+            setPadding(0, dp(5), 0, 0)
         }
 
         val valuesArea = LinearLayout(this).apply {
@@ -453,7 +545,7 @@ class MainActivity : AppCompatActivity() {
                 valuesArea.addView(this, LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, dp(13)
                 ).apply {
-                    topMargin = dp(4)
+                    topMargin = dp(2)
                 })
             }
         }
@@ -478,7 +570,7 @@ class MainActivity : AppCompatActivity() {
         waveArea.addView(waveformView, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, dp(80)
         ).apply {
-            topMargin = dp(4)
+            topMargin = dp(2)
         })
 
         bottomRow.addView(valuesArea, LinearLayout.LayoutParams(
@@ -492,6 +584,43 @@ class MainActivity : AppCompatActivity() {
 
         panel.addView(bottomRow)
         return panel
+    }
+    private fun setDrawerOpen(open: Boolean) {
+        if (drawerOpen == open) return
+
+        drawerOpen = open
+        drawerScrim.animate().cancel()
+        drawerPanel.animate().cancel()
+
+        if (open) {
+            drawerToggleButton.visibility = View.GONE
+            drawerScrim.visibility = View.VISIBLE
+            drawerScrim.alpha = 0f
+
+            drawerScrim.animate()
+                .alpha(1f)
+                .setDuration(180)
+                .start()
+
+            drawerPanel.animate()
+                .translationX(0f)
+                .setDuration(220)
+                .start()
+        } else {
+            drawerToggleButton.visibility = View.VISIBLE
+            drawerScrim.animate()
+                .alpha(0f)
+                .setDuration(180)
+                .withEndAction {
+                    drawerScrim.visibility = View.GONE
+                }
+                .start()
+
+            drawerPanel.animate()
+                .translationX(drawerPanel.width.toFloat())
+                .setDuration(220)
+                .start()
+        }
     }
     private fun createBottomPanel(): LinearLayout {
         val panel = LinearLayout(this).apply {
@@ -516,18 +645,21 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         measureButton = Button(this).apply {
+            typeface = appTypeface
             text = "計測開始"
             setOnClickListener {
                 if (isMeasuring) stopMeasurement() else startMeasurement()
             }
         }
         recordButton = Button(this).apply {
+            typeface = appTypeface
             text = "CSV記録開始"
             setOnClickListener {
                 if (csvRecorder.isRecording) stopRecording() else startRecording()
             }
         }
         val listButton = Button(this).apply {
+            typeface = appTypeface
             text = "記録一覧"
             setOnClickListener { showRecordingList() }
         }
@@ -537,6 +669,7 @@ class MainActivity : AppCompatActivity() {
         panel.addView(buttons)
 
         val settingsButton = Button(this).apply {
+            typeface = appTypeface
             text = "自動記録設定"
             setOnClickListener { showAutoRecordingSettings() }
         }
@@ -568,8 +701,14 @@ class MainActivity : AppCompatActivity() {
         TextView(this).apply {
             text = value
             textSize = size
+            includeFontPadding = false
+            setPadding(0, 0, 0, 0)
+            setLineSpacing(0f, 1f)
             setTextColor(Color.WHITE)
-            if (bold) typeface = Typeface.DEFAULT_BOLD
+            typeface = Typeface.create(
+                appTypeface,
+                if (bold) Typeface.BOLD else Typeface.NORMAL
+            )
             gravity = Gravity.CENTER_VERTICAL
             maxLines = 1
         }
@@ -670,7 +809,7 @@ class MainActivity : AppCompatActivity() {
         val cls = IntensityClass.fromRawIntensity(sample.rawIntensity)
         val colors = IntensityClassColors.colorsFor(cls)
 
-        intensityClassText.text = "震度 ${cls.label}"
+        intensityClassText.text = cls.label
         intensityClassText.setTextColor(colors.text)
         intensityClassText.background = android.graphics.drawable.GradientDrawable().apply {
             setColor(colors.background)
@@ -734,7 +873,7 @@ class MainActivity : AppCompatActivity() {
     val cls = IntensityClass.fromRawIntensity(rawIntensity)
     val colors = IntensityClassColors.colorsFor(cls)
 
-    intensityClassText.text = "震度 ${cls.label}"
+    intensityClassText.text = cls.label
     intensityClassText.setTextColor(colors.text)
     intensityClassText.background = android.graphics.drawable.GradientDrawable().apply {
         setColor(colors.background)
@@ -1265,9 +1404,4 @@ private fun updateAutomaticRecording(sample: ProcessedSample) {
         super.onDestroy()
     }
 }
-
-
-
-
-
 

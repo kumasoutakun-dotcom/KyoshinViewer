@@ -3,6 +3,7 @@
 import android.annotation.SuppressLint
 import android.app.AlertDialog
 import android.graphics.Color
+import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.ConnectivityManager
@@ -20,14 +21,20 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
+import android.widget.EditText
 import android.widget.FrameLayout
+import android.text.InputType
+import android.view.inputmethod.EditorInfo
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.appcompat.app.AppCompatActivity
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.card.MaterialCardView
+import com.google.android.material.textfield.TextInputEditText
+import com.google.android.material.textfield.TextInputLayout
 import jp.example.kyoshinviewer.data.KwatchWebPageSource
 import jp.example.kyoshinviewer.data.MonitorPageSource
 import jp.example.kyoshinviewer.intensity.color.IntensityClassColors
@@ -46,7 +53,29 @@ import java.util.concurrent.atomic.AtomicLong
 
 class MainActivity : AppCompatActivity() {
 
+    // Material 3 dark color roles. Intensity colors remain defined by the seismic scale.
+    private val m3Background = Color.rgb(12, 18, 27)
+    private val m3Surface = Color.rgb(18, 25, 36)
+    private val m3SurfaceContainer = Color.rgb(25, 34, 47)
+    private val m3SurfaceContainerLow = Color.rgb(21, 29, 41)
+    private val m3SurfaceContainerHigh = Color.rgb(34, 45, 60)
+    private val m3Primary = Color.rgb(174, 199, 255)
+    private val m3OnPrimary = Color.rgb(15, 39, 76)
+    private val m3PrimaryContainer = Color.rgb(43, 65, 101)
+    private val m3OnPrimaryContainer = Color.rgb(220, 230, 255)
+    private val m3OnSurface = Color.rgb(226, 232, 241)
+    private val m3OnSurfaceVariant = Color.rgb(184, 196, 212)
+    private val m3Outline = Color.rgb(112, 128, 148)
+    private val m3OutlineVariant = Color.rgb(66, 80, 99)
+
     private lateinit var webView: WebView
+    private lateinit var secondaryWebView: WebView
+    private lateinit var webViewArea: LinearLayout
+    private lateinit var secondaryBrowserBar: LinearLayout
+    private lateinit var browserUrlLayout: TextInputLayout
+    private lateinit var browserUrlInput: EditText
+    private lateinit var splitToggleButton: Button
+    private var splitEnabled = false
     private lateinit var errorLayout: LinearLayout
     private lateinit var networkMonitor: NetworkMonitor
     private lateinit var measurementEngine: SeismicMeasurementEngine
@@ -163,90 +192,142 @@ class MainActivity : AppCompatActivity() {
             autoStopIntensity = IntensityClass.LEVEL_0
         }
 
-        val outer = FrameLayout(this)
+        val outer = FrameLayout(this).apply {
+            setBackgroundColor(m3Background)
+        }
         val page = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.rgb(8, 14, 24))
+            setBackgroundColor(m3Background)
         }
 
-        createTopPanel().also {
-            page.addView(it, LinearLayout.LayoutParams(
+        createTopPanel().also { card ->
+            page.addView(card, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ))
+            ).apply {
+                setMargins(dp(12), dp(10), dp(12), dp(2))
+            })
         }
 
         page.addView(text("出典: KyoshinShindoColorMap / ingen084氏", 9f).apply {
-            setTextColor(Color.LTGRAY)
-            setPadding(dp(16), dp(2), dp(16), dp(4))
+            setTextColor(m3OnSurfaceVariant)
+            setPadding(dp(18), dp(4), dp(18), dp(6))
         }, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
         ))
 
-        webView = WebView(this).apply {
-            settings.javaScriptEnabled = true
-            settings.domStorageEnabled = true
-            settings.loadsImagesAutomatically = true
-            settings.useWideViewPort = true
-            settings.loadWithOverviewMode = true
-            settings.setSupportZoom(true)
-            settings.builtInZoomControls = true
-            settings.displayZoomControls = false
-            webChromeClient = WebChromeClient()
-            webViewClient = object : WebViewClient() {
-                override fun onPageFinished(view: WebView?, url: String?) {
-                    hideError()
-                }
-
-                override fun onReceivedError(
-                    view: WebView?,
-                    request: WebResourceRequest?,
-                    error: WebResourceError?
-                ) {
-                    val host = request?.url?.host.orEmpty()
-                    if (request?.isForMainFrame == true ||
-                        host.contains("kmoni.bosai.go.jp") ||
-                        host.contains("lmoni.bosai.go.jp")
-                    ) showError()
-                }
-
-                override fun onReceivedHttpError(
-                    view: WebView?,
-                    request: WebResourceRequest?,
-                    errorResponse: WebResourceResponse?
-                ) {
-                    val host = request?.url?.host.orEmpty()
-                    if ((request?.isForMainFrame == true ||
-                            host.contains("kmoni.bosai.go.jp") ||
-                            host.contains("lmoni.bosai.go.jp")) &&
-                        (errorResponse?.statusCode ?: 0) >= 400
-                    ) showError()
-                }
-            }
+        // WebView表示領域。画面全体ではなく、この領域だけを上下分割する。
+        webViewArea = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(m3Background)
         }
 
-        page.addView(webView, LinearLayout.LayoutParams(
+        webView = createBrowserWebView(isMonitor = true)
+        secondaryWebView = createBrowserWebView(isMonitor = false)
+
+        webViewArea.addView(webView, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
         ))
 
-        val scrollView = ScrollView(this).apply {
-            isFillViewport = true
-            isVerticalScrollBarEnabled = true
+        // 下段ブラウザのURL入力欄
+        secondaryBrowserBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            background = roundedBackground(m3SurfaceContainer, dp(18))
+            visibility = View.GONE
         }
-        scrollView.addView(page, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT,
-            FrameLayout.LayoutParams.WRAP_CONTENT
+
+        browserUrlLayout = TextInputLayout(this).apply {
+            boxBackgroundMode = TextInputLayout.BOX_BACKGROUND_OUTLINE
+            hint = "URL"
+            setHintTextColor(ColorStateList.valueOf(m3OnSurfaceVariant))
+            setBoxStrokeColorStateList(
+                ColorStateList(
+                    arrayOf(intArrayOf(android.R.attr.state_focused), intArrayOf()),
+                    intArrayOf(m3Primary, m3Outline)
+                )
+            )
+            setBoxStrokeWidth(dp(1))
+            setBoxStrokeWidthFocused(dp(2))
+            setBoxCornerRadii(
+                dp(12).toFloat(), dp(12).toFloat(),
+                dp(12).toFloat(), dp(12).toFloat()
+            )
+        }
+
+        browserUrlInput = TextInputEditText(this).apply {
+            typeface = appTypeface
+            textSize = 14f
+            setSingleLine(true)
+            hint = "https://example.com"
+            setTextColor(m3OnSurface)
+            setHintTextColor(m3OnSurfaceVariant)
+            inputType = InputType.TYPE_CLASS_TEXT or
+                InputType.TYPE_TEXT_VARIATION_URI
+            imeOptions = EditorInfo.IME_ACTION_GO
+            setPadding(dp(4), 0, dp(4), 0)
+            setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == EditorInfo.IME_ACTION_GO) {
+                    loadSecondaryUrl()
+                    true
+                } else false
+            }
+        }
+        browserUrlLayout.addView(browserUrlInput, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.MATCH_PARENT
+        ))
+        secondaryBrowserBar.addView(browserUrlLayout, LinearLayout.LayoutParams(
+            0, dp(56), 1f
         ))
 
-        outer.addView(scrollView, FrameLayout.LayoutParams(
+        secondaryBrowserBar.addView(createMaterialButton("開く", ButtonTone.PRIMARY).apply {
+            setOnClickListener { loadSecondaryUrl() }
+        }, LinearLayout.LayoutParams(dp(76), dp(44)).apply {
+            leftMargin = dp(8)
+        })
+
+        webViewArea.addView(secondaryBrowserBar)
+        webViewArea.addView(secondaryWebView, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+        ).apply {
+            height = 0
+        })
+        secondaryWebView.visibility = View.GONE
+
+        page.addView(webViewArea, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+        ))
+
+        // 画面本体をルートレイアウトに追加
+        outer.addView(page, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT
         ))
 
+        // 強震モニタが最上部にある状態で下へスワイプすると再読み込み
+        var refreshStartY = 0f
+        webView.setOnTouchListener { _, event ->
+            when (event.action) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    refreshStartY = event.y
+                }
+                android.view.MotionEvent.ACTION_UP -> {
+                    val pullDistance = event.y - refreshStartY
+                    if (webView.scrollY <= 0 && pullDistance > dp(110)) {
+                        webView.reload()
+                        showMessage("強震モニタを更新しています")
+                    }
+                }
+            }
+            false
+        }
+
         // サイドバーの背景
         drawerScrim = View(this).apply {
-            setBackgroundColor(Color.argb(150, 0, 0, 0))
+            setBackgroundColor(Color.argb(150, 3, 7, 13))
             visibility = View.GONE
             setOnClickListener { setDrawerOpen(false) }
         }
@@ -263,29 +344,47 @@ class MainActivity : AppCompatActivity() {
 
         drawerPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.rgb(18, 27, 40))
+            background = roundedBackground(m3Surface, dp(28))
+            clipToOutline = true
             elevation = dp(12).toFloat()
+            setPadding(dp(10), dp(8), dp(10), dp(12))
         }
 
         val drawerHeader = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(16), dp(8), dp(8), dp(8))
+            setPadding(dp(10), dp(8), dp(4), dp(8))
         }
 
-        drawerHeader.addView(text("操作・センサー", 16f, true),
-            LinearLayout.LayoutParams(0, dp(48), 1f))
+        drawerHeader.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(text("操作・センサー", 17f, true))
+            addView(text("計測と表示の設定", 11f).apply {
+                setTextColor(m3OnSurfaceVariant)
+                setPadding(0, dp(3), 0, 0)
+            })
+        }, LinearLayout.LayoutParams(0, dp(54), 1f))
 
-        drawerHeader.addView(Button(this).apply {
-            typeface = appTypeface
-            text = "閉じる"
+        drawerHeader.addView(createMaterialButton("閉じる", ButtonTone.TEXT).apply {
             setOnClickListener { setDrawerOpen(false) }
-        }, LinearLayout.LayoutParams(
-            dp(88), dp(42)
-        ))
+        }, LinearLayout.LayoutParams(dp(76), dp(42)))
 
         drawerPanel.addView(drawerHeader)
-        drawerPanel.addView(createBottomPanel())
+
+        splitToggleButton = createMaterialButton("分割ブラウザを表示", ButtonTone.TONAL).apply {
+            setOnClickListener { setSplitEnabled(!splitEnabled) }
+        }
+        drawerPanel.addView(splitToggleButton, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(48)
+        ).apply {
+            setMargins(dp(2), dp(6), dp(2), dp(12))
+        })
+
+        drawerPanel.addView(createBottomPanel(), LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
 
         outer.addView(drawerPanel, FrameLayout.LayoutParams(
             drawerWidth,
@@ -301,12 +400,14 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.CENTER
             setPadding(dp(14), dp(14), dp(14), dp(14))
             background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(Color.rgb(35, 48, 65))
-                cornerRadius = dp(28).toFloat()
+                setColor(m3PrimaryContainer)
+                cornerRadius = dp(20).toFloat()
+                setStroke(dp(1), m3Outline)
             }
             elevation = dp(8).toFloat()
             isClickable = true
             isFocusable = true
+            contentDescription = "操作メニューを開く"
             setOnClickListener { setDrawerOpen(true) }
 
             repeat(3) {
@@ -333,24 +434,23 @@ class MainActivity : AppCompatActivity() {
         errorLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setBackgroundColor(Color.rgb(25, 25, 30))
+            setBackgroundColor(m3Surface)
             setPadding(dp(32), dp(32), dp(32), dp(32))
             visibility = View.GONE
             addView(TextView(context).apply {
                 text = "通信エラー"
                 textSize = 20f
-                setTextColor(Color.WHITE)
+                setTextColor(m3OnSurface)
                 gravity = Gravity.CENTER
             })
             addView(TextView(context).apply {
                 text = "通信状態または接続先サーバーを確認しています。"
                 textSize = 14f
-                setTextColor(Color.LTGRAY)
+                setTextColor(m3OnSurfaceVariant)
                 gravity = Gravity.CENTER
                 setPadding(0, dp(16), 0, dp(24))
             })
-            addView(Button(context).apply {
-                text = "再読み込み"
+            addView(createMaterialButton("再読み込み", ButtonTone.PRIMARY).apply {
                 setOnClickListener { webView.reload() }
             })
         }
@@ -449,19 +549,125 @@ class MainActivity : AppCompatActivity() {
         networkMonitor.start()
 
         if (savedInstanceState != null) {
-            webView.restoreState(savedInstanceState)
+            savedInstanceState.getBundle("monitor_webview_state")?.let {
+                webView.restoreState(it)
+            }
+            savedInstanceState.getBundle("secondary_webview_state")?.let {
+                secondaryWebView.restoreState(it)
+            }
+            setSplitEnabled(savedInstanceState.getBoolean("split_enabled", false))
+            if (webView.url.isNullOrBlank()) {
+                webView.loadUrl(monitorPageSource.startPageUrl)
+            }
         } else {
             webView.loadUrl(monitorPageSource.startPageUrl)
         }
     }
 
-    private fun createTopPanel(): LinearLayout {
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun createBrowserWebView(isMonitor: Boolean): WebView {
+        return WebView(this).apply {
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.loadsImagesAutomatically = true
+            settings.useWideViewPort = true
+            settings.loadWithOverviewMode = true
+            settings.setSupportZoom(true)
+            settings.builtInZoomControls = true
+            settings.displayZoomControls = false
+            webChromeClient = WebChromeClient()
+            webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    if (isMonitor) hideError()
+                    if (!isMonitor && !url.isNullOrBlank() &&
+                        ::browserUrlInput.isInitialized
+                    ) {
+                        browserUrlInput.setText(url)
+                    }
+                }
+
+                override fun onReceivedError(
+                    view: WebView?,
+                    request: WebResourceRequest?,
+                    error: WebResourceError?
+                ) {
+                    if (isMonitor && request?.isForMainFrame == true) showError()
+                }
+
+                override fun onReceivedHttpError(
+                    view: WebView?,
+                    request: WebResourceRequest?,
+                    errorResponse: WebResourceResponse?
+                ) {
+                    if (isMonitor && request?.isForMainFrame == true &&
+                        (errorResponse?.statusCode ?: 0) >= 400
+                    ) showError()
+                }
+            }
+        }
+    }
+
+    private fun loadSecondaryUrl() {
+        var address = browserUrlInput.text.toString().trim()
+        if (address.isBlank()) {
+            showMessage("URLを入力してください")
+            return
+        }
+        if (!address.contains("://")) address = "https://$address"
+
+        val uri = runCatching { Uri.parse(address) }.getOrNull()
+        if (uri == null || (uri.scheme != "http" && uri.scheme != "https") ||
+            uri.host.isNullOrBlank()
+        ) {
+            showMessage("http:// または https:// のURLを入力してください")
+            return
+        }
+
+        browserUrlInput.setText(address)
+        secondaryWebView.loadUrl(uri.toString())
+        val imm = getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+        imm.hideSoftInputFromWindow(browserUrlInput.windowToken, 0)
+        browserUrlInput.clearFocus()
+    }
+
+    private fun setSplitEnabled(enabled: Boolean) {
+        splitEnabled = enabled
+        if (!::secondaryBrowserBar.isInitialized) return
+
+        secondaryBrowserBar.visibility = if (enabled) View.VISIBLE else View.GONE
+        secondaryWebView.visibility = if (enabled) View.VISIBLE else View.GONE
+        splitToggleButton.text =
+            if (enabled) "分割ブラウザを閉じる" else "分割ブラウザを表示"
+
+        val primaryParams = webView.layoutParams as LinearLayout.LayoutParams
+        val secondaryParams = secondaryWebView.layoutParams as LinearLayout.LayoutParams
+        if (enabled) {
+            primaryParams.height = 0
+            primaryParams.weight = 1f
+            secondaryParams.height = 0
+            secondaryParams.weight = 1f
+        } else {
+            primaryParams.height = 0
+            primaryParams.weight = 1f
+            secondaryParams.height = 0
+            secondaryParams.weight = 0f
+        }
+        webView.layoutParams = primaryParams
+        secondaryWebView.layoutParams = secondaryParams
+    }
+
+    private fun createTopPanel(): MaterialCardView {
+        val card = MaterialCardView(this).apply {
+            setRadius(dp(24).toFloat())
+            cardElevation = dp(2).toFloat()
+            setStrokeWidth(dp(1))
+            setStrokeColor(m3OutlineVariant)
+            setCardBackgroundColor(m3SurfaceContainer)
+            useCompatPadding = false
+        }
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(14), dp(14), dp(14))
-            background = roundedBackground(Color.rgb(40, 60, 100), dp(28))
-            elevation = dp(4).toFloat()
-            clipToOutline = true
+            setPadding(dp(16), dp(14), dp(16), dp(14))
         }
 
         // 上段：震度階級と震度履歴
@@ -477,7 +683,7 @@ class MainActivity : AppCompatActivity() {
 
         classArea.addView(
             text("計測震度", 20f).apply {
-                setTextColor(Color.rgb(192, 200, 216))
+                setTextColor(m3OnSurfaceVariant)
             }
         )
 
@@ -486,7 +692,7 @@ class MainActivity : AppCompatActivity() {
             includeFontPadding = false
             setPadding(0, 0, 0, dp(4))
             setTextColor(Color.WHITE)
-            background = roundedBackground(Color.rgb(100, 130, 170), dp(7))
+            background = roundedBackground(m3PrimaryContainer, dp(12))
         }
         classArea.addView(intensityClassText, LinearLayout.LayoutParams(
             dp(80), dp(50)
@@ -517,6 +723,14 @@ class MainActivity : AppCompatActivity() {
             leftMargin = dp(8)
         })
         panel.addView(topRow)
+        panel.addView(View(this).apply {
+            setBackgroundColor(m3OutlineVariant)
+        }, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(1)
+        ).apply {
+            topMargin = dp(12)
+            bottomMargin = dp(6)
+        })
 
         // 下段：左に計測値、右にXYZ波形
         val bottomRow = LinearLayout(this).apply {
@@ -534,7 +748,7 @@ class MainActivity : AppCompatActivity() {
                 gravity = Gravity.CENTER_VERTICAL
             }
             row.addView(text(caption, 13f).apply {
-                setTextColor(Color.rgb(192, 200, 216))
+                setTextColor(m3OnSurfaceVariant)
             }, LinearLayout.LayoutParams(0,
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             row.addView(valueView)
@@ -550,11 +764,16 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        intensityText = text("--.-", 22f, true)
+        intensityText = text("--.-", 22f, true).apply {
+            includeFontPadding = false
+        }
         intensityText.gravity = Gravity.END
         intensityColorBar = addValueRow("リアルタイム震度:", intensityText)
 
-        pgaText = text("--.- gal", 22f, true)
+        pgaText = text("--.- gal", 22f, true).apply {
+            includeFontPadding = false
+            setPadding(0, 0, 0, dp(3))
+        }
         pgaText.gravity = Gravity.END
         accelerationColorBar = addValueRow("リアルタイム加速度:", pgaText)
 
@@ -583,7 +802,8 @@ class MainActivity : AppCompatActivity() {
         })
 
         panel.addView(bottomRow)
-        return panel
+        card.addView(panel)
+        return card
     }
     private fun setDrawerOpen(open: Boolean) {
         if (drawerOpen == open) return
@@ -625,64 +845,111 @@ class MainActivity : AppCompatActivity() {
     private fun createBottomPanel(): LinearLayout {
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(9), dp(6), dp(9), dp(7))
-            setBackgroundColor(Color.rgb(18, 27, 40))
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            background = roundedBackground(m3SurfaceContainerLow, dp(20))
         }
 
-        sensorStatusText = text("センサー初期化中", 11f)
+        panel.addView(text("センサー計測", 13f, true).apply {
+            setTextColor(m3Primary)
+            setPadding(0, 0, 0, dp(8))
+        })
+
+        sensorStatusText = text("センサー初期化中", 12f)
         panel.addView(sensorStatusText)
 
-        sampleRateText = text("サンプル: -- Hz", 12f)
+        sampleRateText = text("サンプル: -- Hz", 12f).apply {
+            setTextColor(m3OnSurfaceVariant)
+        }
         panel.addView(sampleRateText, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, dp(25)
         ))
 
-        calibrationText = text("静止時ノイズ: --", 11f)
+        calibrationText = text("静止時ノイズ: --", 11f).apply {
+            setTextColor(m3OnSurfaceVariant)
+        }
         panel.addView(calibrationText)
 
         val buttons = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        measureButton = Button(this).apply {
-            typeface = appTypeface
-            text = "計測開始"
+        measureButton = createMaterialButton("計測開始", ButtonTone.PRIMARY).apply {
             setOnClickListener {
                 if (isMeasuring) stopMeasurement() else startMeasurement()
             }
         }
-        recordButton = Button(this).apply {
-            typeface = appTypeface
-            text = "CSV記録開始"
+        recordButton = createMaterialButton("CSV記録開始", ButtonTone.OUTLINED).apply {
             setOnClickListener {
                 if (csvRecorder.isRecording) stopRecording() else startRecording()
             }
         }
-        val listButton = Button(this).apply {
-            typeface = appTypeface
-            text = "記録一覧"
+        val listButton = createMaterialButton("記録一覧", ButtonTone.TONAL).apply {
             setOnClickListener { showRecordingList() }
         }
-        buttons.addView(measureButton, LinearLayout.LayoutParams(0, dp(42), 1f))
-        buttons.addView(recordButton, LinearLayout.LayoutParams(0, dp(42), 1f))
-        buttons.addView(listButton, LinearLayout.LayoutParams(0, dp(42), 1f))
+        buttons.addView(measureButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply {
+            rightMargin = dp(3)
+        })
+        buttons.addView(recordButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply {
+            leftMargin = dp(3)
+            rightMargin = dp(3)
+        })
+        buttons.addView(listButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply {
+            leftMargin = dp(3)
+        })
         panel.addView(buttons)
 
-        val settingsButton = Button(this).apply {
-            typeface = appTypeface
-            text = "自動記録設定"
+        val settingsButton = createMaterialButton("自動記録設定", ButtonTone.OUTLINED).apply {
             setOnClickListener { showAutoRecordingSettings() }
         }
         panel.addView(settingsButton, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, dp(38)
-        ))
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(44)
+        ).apply {
+            topMargin = dp(8)
+        })
 
         return panel
     }
+    private enum class ButtonTone { PRIMARY, TONAL, OUTLINED, TEXT }
+
+    private fun createMaterialButton(label: String, tone: ButtonTone): MaterialButton {
+        val fillColor = when (tone) {
+            ButtonTone.PRIMARY -> m3Primary
+            ButtonTone.TONAL -> m3PrimaryContainer
+            ButtonTone.OUTLINED -> m3SurfaceContainerHigh
+            ButtonTone.TEXT -> Color.TRANSPARENT
+        }
+        val contentColor = when (tone) {
+            ButtonTone.PRIMARY -> m3OnPrimary
+            ButtonTone.TONAL -> m3OnPrimaryContainer
+            ButtonTone.OUTLINED -> m3OnSurface
+            ButtonTone.TEXT -> m3Primary
+        }
+        val outlined = tone == ButtonTone.OUTLINED
+
+        return MaterialButton(this).apply {
+            text = label
+            typeface = appTypeface
+            textSize = 13f
+            isAllCaps = false
+            setCornerRadius(dp(14))
+            setInsetTop(0)
+            setInsetBottom(0)
+            minimumHeight = dp(44)
+            backgroundTintList = ColorStateList.valueOf(fillColor)
+            setTextColor(contentColor)
+            setStrokeWidth(if (outlined) dp(1) else 0)
+            setStrokeColor(ColorStateList.valueOf(
+                if (outlined) m3Outline else Color.TRANSPARENT
+            ))
+            setRippleColor(ColorStateList.valueOf(Color.argb(36, 190, 210, 255)))
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+        }
+    }
+
     private fun card(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         setPadding(dp(9), dp(5), dp(9), dp(5))
-        background = roundedBackground(Color.rgb(25, 39, 58), dp(9))
+        background = roundedBackground(m3SurfaceContainerLow, dp(16))
         val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         params.setMargins(dp(3), dp(3), dp(3), dp(3))
         layoutParams = params
@@ -694,7 +961,7 @@ class MainActivity : AppCompatActivity() {
         }
 
     private fun label(value: String): TextView = text(value, 10f, false).apply {
-        setTextColor(Color.LTGRAY)
+        setTextColor(m3OnSurfaceVariant)
     }
 
     private fun text(value: String, size: Float, bold: Boolean = false): TextView =
@@ -704,7 +971,7 @@ class MainActivity : AppCompatActivity() {
             includeFontPadding = false
             setPadding(0, 0, 0, 0)
             setLineSpacing(0f, 1f)
-            setTextColor(Color.WHITE)
+            setTextColor(m3OnSurface)
             typeface = Typeface.create(
                 appTypeface,
                 if (bold) Typeface.BOLD else Typeface.NORMAL
@@ -717,7 +984,7 @@ class MainActivity : AppCompatActivity() {
         GradientDrawable().apply {
             setColor(color)
             cornerRadius = radius.toFloat()
-            setStroke(dp(1), Color.argb(70, 210, 225, 255))
+            setStroke(dp(1), m3OutlineVariant)
         }
 
     private fun startMeasurement() {
@@ -1377,13 +1644,28 @@ private fun updateAutomaticRecording(sample: ProcessedSample) {
         (value * resources.displayMetrics.density).toInt()
 
     override fun onSaveInstanceState(outState: Bundle) {
-        if (::webView.isInitialized) webView.saveState(outState)
+        if (::webView.isInitialized) {
+            val monitorState = Bundle()
+            webView.saveState(monitorState)
+            outState.putBundle("monitor_webview_state", monitorState)
+        }
+        if (::secondaryWebView.isInitialized) {
+            val secondaryState = Bundle()
+            secondaryWebView.saveState(secondaryState)
+            outState.putBundle("secondary_webview_state", secondaryState)
+        }
+        outState.putBoolean("split_enabled", splitEnabled)
         super.onSaveInstanceState(outState)
     }
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (::webView.isInitialized && webView.canGoBack()) {
+        if (::secondaryWebView.isInitialized &&
+            secondaryWebView.visibility == View.VISIBLE &&
+            secondaryWebView.canGoBack()
+        ) {
+            secondaryWebView.goBack()
+        } else if (::webView.isInitialized && webView.canGoBack()) {
             webView.goBack()
         } else {
             super.onBackPressed()
@@ -1401,7 +1683,14 @@ private fun updateAutomaticRecording(sample: ProcessedSample) {
             webView.stopLoading()
             webView.destroy()
         }
+        if (::secondaryWebView.isInitialized) {
+            secondaryWebView.stopLoading()
+            secondaryWebView.destroy()
+        }
         super.onDestroy()
     }
 }
+
+
+
 

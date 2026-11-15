@@ -1,14 +1,22 @@
-﻿# KyoshinViewer
+# Shindo-Viewer
 
-KyoshinViewerは、強震モニタの表示と、Android端末の加速度センサーを利用した揺れの計測を行うアプリです。
+Shindo-Viewerは、Android端末の加速度センサーを利用した揺れの計測と、Webページの表示を行うアプリです。
 
 ## 主な機能
 
-### 強震モニタ
-- 強震モニタのWebページをアプリ内に表示
+### Webページの表示
+
+- Webページをアプリ内のブラウザで表示
+- 任意のURLを指定してページを表示
+- 上下2画面でWebページを表示
+- 上下それぞれの表示URLを個別に設定
+- 画面境界をドラッグして上下の表示領域を調整
 - 表示内容の再読み込み
 
+URLの設定はサイドバーから行えます。
+
 ### 加速度センサーによる揺れの計測
+
 - 端末内蔵の加速度センサーを使用
 - X・Y・Z各軸の加速度を取得
 - 各軸にリアルタイム震度算出用のフィルターを適用
@@ -18,11 +26,13 @@ KyoshinViewerは、強震モニタの表示と、Android端末の加速度セン
 - センサー情報とサンプリング周波数を確認
 
 ### 計測データの記録
+
 - 計測結果をCSV形式で保存
 - 保存した記録の一覧表示
 - 記録データの再生
 - 記録の削除とCSVファイルのエクスポート
 - 震度相当値を基準とした自動記録・自動停止
+- 自動記録の設定値を段階的に調整
 
 ## 震度相当値について
 
@@ -79,7 +89,7 @@ CSVのヘッダーには `RealtimeIntensity` という識別文字列を使用�
 
 GitHubのReleasesページからAPKファイルを取得できます。
 
-https://github.com/kumasoutakun-dotcom/KyoshinViewer/releases
+[Shindo-Viewer Releases](https://github.com/kumasoutakun-dotcom/Shindo-Viewer/releases)
 
 APKをインストールする際は、Androidの設定で必要なインストール許可を確認してください。
 

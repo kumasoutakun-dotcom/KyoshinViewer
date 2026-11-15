@@ -1,4 +1,4 @@
-﻿package jp.example.kyoshinviewer
+package jp.example.kyoshinviewer
 
 import android.annotation.SuppressLint
 import android.app.AlertDialog
@@ -26,6 +26,7 @@ import android.widget.FrameLayout
 import android.text.InputType
 import android.view.inputmethod.EditorInfo
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.WindowInsetsCompat
@@ -33,6 +34,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.appcompat.app.AppCompatActivity
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
+import com.google.android.material.slider.Slider
 import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.textfield.TextInputLayout
 import jp.example.kyoshinviewer.data.KwatchWebPageSource
@@ -71,11 +73,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private lateinit var secondaryWebView: WebView
     private lateinit var webViewArea: LinearLayout
+   private lateinit var primaryBrowserBar: LinearLayout
     private lateinit var secondaryBrowserBar: LinearLayout
-    private lateinit var browserUrlLayout: TextInputLayout
-    private lateinit var browserUrlInput: EditText
+    private lateinit var primaryBrowserUrlInput: EditText
+    private lateinit var secondaryBrowserUrlInput: EditText
     private lateinit var splitToggleButton: Button
     private var splitEnabled = false
+    private var topSplitRatio = 50f
+    private lateinit var splitRatioSlider: Slider
+    private lateinit var splitRatioLabel: TextView
     private lateinit var errorLayout: LinearLayout
     private lateinit var networkMonitor: NetworkMonitor
     private lateinit var measurementEngine: SeismicMeasurementEngine
@@ -97,6 +103,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var drawerPanel: LinearLayout
     private lateinit var drawerScrim: View
     private lateinit var drawerToggleButton: View
+    private lateinit var mainRoot: FrameLayout
+    private var csvHistoryVisible = false
 
     private val appTypeface by lazy {
         resources.getFont(R.font.gen_zen_gothic_kaic)
@@ -114,8 +122,17 @@ class MainActivity : AppCompatActivity() {
     private var autoStartIntensity = IntensityClass.LEVEL_2
     private var autoStopIntensity = IntensityClass.LEVEL_0
 
+    private lateinit var autoStartSlider: Slider
+    private lateinit var autoStopSlider: Slider
+    private lateinit var autoStartLabel: TextView
+    private lateinit var autoStopLabel: TextView
+    private var updatingAutoSliders = false
+
     private var belowStopThresholdSinceNanos = 0L
     private var selectedExportFile: File? = null
+    private var csvHistoryStatusText: TextView? = null
+    private var csvHistoryListContent: LinearLayout? = null
+    private val csvHistoryExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
     private var playbackRunnable: Runnable? = null
     private var playbackDialog: AlertDialog? = null
     private var networkLost = false
@@ -147,15 +164,50 @@ class MainActivity : AppCompatActivity() {
         registerForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri: Uri? ->
             val source = selectedExportFile
             selectedExportFile = null
-            if (uri == null || source == null) return@registerForActivityResult
-            val exported = runCatching {
-                synchronized(recorderLock) {
-                    csvRecorder.exportFileTo(source, uri)
-                }
-            }.getOrDefault(false)
-            showMessage(if (exported) "CSVを書き出しました" else "CSVの書き出しに失敗しました")
-        }
 
+            if (source == null) return@registerForActivityResult
+
+            if (uri == null) {
+                if (csvHistoryVisible) {
+                    csvHistoryStatusText?.text = "CSV書き出しをキャンセルしました"
+                }
+                return@registerForActivityResult
+            }
+
+            csvHistoryStatusText?.text = "書き出し中…"
+
+            csvHistoryExecutor.execute {
+                val existedBefore = source.isFile
+                val exported = if (existedBefore) {
+                    runCatching {
+                        synchronized(recorderLock) {
+                            csvRecorder.exportFileTo(source, uri)
+                        }
+                    }.getOrDefault(false)
+                } else {
+                    false
+                }
+
+                val message = when {
+                    !existedBefore || (!exported && !source.isFile) ->
+                        "この記録は既に削除されています。更新してください。"
+                    exported ->
+                        "CSVを書き出しました"
+                    else ->
+                        "CSVの書き出しに失敗しました"
+                }
+
+                runOnUiThread {
+                    if (isDestroyed || isFinishing) return@runOnUiThread
+
+                    if (csvHistoryVisible) {
+                        csvHistoryStatusText?.text = message
+                    } else {
+                        showMessage(message)
+                    }
+                }
+            }
+        }
     private val retryRunnable = object : Runnable {
         override fun run() {
             if (!isDestroyed &&
@@ -171,6 +223,8 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        topSplitRatio = savedInstanceState?.getFloat("split_ratio", 50f)
+            ?.coerceIn(10f, 90f) ?: 50f
         supportActionBar?.hide()
         hideSystemBars()
 
@@ -230,66 +284,8 @@ class MainActivity : AppCompatActivity() {
             LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
         ))
 
-        // 下段ブラウザのURL入力欄
-        secondaryBrowserBar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(10), dp(8), dp(10), dp(8))
-            background = roundedBackground(m3SurfaceContainer, dp(18))
-            visibility = View.GONE
-        }
-
-        browserUrlLayout = TextInputLayout(this).apply {
-            boxBackgroundMode = TextInputLayout.BOX_BACKGROUND_OUTLINE
-            hint = "URL"
-            setHintTextColor(ColorStateList.valueOf(m3OnSurfaceVariant))
-            setBoxStrokeColorStateList(
-                ColorStateList(
-                    arrayOf(intArrayOf(android.R.attr.state_focused), intArrayOf()),
-                    intArrayOf(m3Primary, m3Outline)
-                )
-            )
-            setBoxStrokeWidth(dp(1))
-            setBoxStrokeWidthFocused(dp(2))
-            setBoxCornerRadii(
-                dp(12).toFloat(), dp(12).toFloat(),
-                dp(12).toFloat(), dp(12).toFloat()
-            )
-        }
-
-        browserUrlInput = TextInputEditText(this).apply {
-            typeface = appTypeface
-            textSize = 14f
-            setSingleLine(true)
-            hint = "https://example.com"
-            setTextColor(m3OnSurface)
-            setHintTextColor(m3OnSurfaceVariant)
-            inputType = InputType.TYPE_CLASS_TEXT or
-                InputType.TYPE_TEXT_VARIATION_URI
-            imeOptions = EditorInfo.IME_ACTION_GO
-            setPadding(dp(4), 0, dp(4), 0)
-            setOnEditorActionListener { _, actionId, _ ->
-                if (actionId == EditorInfo.IME_ACTION_GO) {
-                    loadSecondaryUrl()
-                    true
-                } else false
-            }
-        }
-        browserUrlLayout.addView(browserUrlInput, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.MATCH_PARENT
-        ))
-        secondaryBrowserBar.addView(browserUrlLayout, LinearLayout.LayoutParams(
-            0, dp(56), 1f
-        ))
-
-        secondaryBrowserBar.addView(createMaterialButton("開く", ButtonTone.PRIMARY).apply {
-            setOnClickListener { loadSecondaryUrl() }
-        }, LinearLayout.LayoutParams(dp(76), dp(44)).apply {
-            leftMargin = dp(8)
-        })
-
-        webViewArea.addView(secondaryBrowserBar)
+       primaryBrowserBar = createBrowserUrlBar(isPrimary = true)
+        secondaryBrowserBar = createBrowserUrlBar(isPrimary = false)
         webViewArea.addView(secondaryWebView, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
         ).apply {
@@ -318,7 +314,7 @@ class MainActivity : AppCompatActivity() {
                     val pullDistance = event.y - refreshStartY
                     if (webView.scrollY <= 0 && pullDistance > dp(110)) {
                         webView.reload()
-                        showMessage("強震モニタを更新しています")
+                        showMessage("ページを更新しています")
                     }
                 }
             }
@@ -370,23 +366,120 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { setDrawerOpen(false) }
         }, LinearLayout.LayoutParams(dp(76), dp(42)))
 
-        drawerPanel.addView(drawerHeader)
+               drawerPanel.addView(drawerHeader)
+
+        val drawerScrollContent = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        val drawerScrollView = ScrollView(this).apply {
+            isFillViewport = false
+            clipToPadding = false
+            scrollBarStyle = View.SCROLLBARS_INSIDE_INSET
+        }
+
+        drawerScrollView.addView(
+            drawerScrollContent,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        drawerPanel.addView(
+            drawerScrollView,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        )
+
+        drawerScrollContent.addView(text("ブラウザ", 13f, true).apply {
+            setTextColor(m3Primary)
+            setPadding(dp(10), dp(8), 0, dp(2))
+        })
+
+        drawerScrollContent.addView(primaryBrowserBar,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        drawerScrollContent.addView(secondaryBrowserBar,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
 
         splitToggleButton = createMaterialButton("分割ブラウザを表示", ButtonTone.TONAL).apply {
             setOnClickListener { setSplitEnabled(!splitEnabled) }
         }
-        drawerPanel.addView(splitToggleButton, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, dp(48)
+
+        drawerScrollContent.addView(splitToggleButton,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(48)
+            ).apply {
+                setMargins(dp(2), dp(6), dp(2), dp(12))
+            }
+        )
+
+        val splitRatioPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), dp(2), dp(10), dp(4))
+        }
+
+        splitRatioLabel = text(
+            "上段 ${topSplitRatio.toInt()}% / 下段 ${(100f - topSplitRatio).toInt()}%",
+            11f,
+            true
         ).apply {
-            setMargins(dp(2), dp(6), dp(2), dp(12))
-        })
+            setTextColor(m3OnSurfaceVariant)
+        }
+        splitRatioPanel.addView(splitRatioLabel)
 
-        drawerPanel.addView(createBottomPanel(), LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ))
+        splitRatioSlider = Slider(this).apply {
+            valueFrom = 10f
+            valueTo = 90f
+            stepSize = 1f
+            value = topSplitRatio
+            contentDescription = "上下ブラウザの分割比率"
 
-        outer.addView(drawerPanel, FrameLayout.LayoutParams(
+            addOnChangeListener { _, value, _ ->
+                topSplitRatio = value
+                splitRatioLabel.text =
+                    "上段 ${value.toInt()}% / 下段 ${(100f - value).toInt()}%"
+
+                if (splitEnabled) {
+                    applySplitRatio()
+                }
+            }
+        }
+
+        splitRatioPanel.addView(splitRatioSlider,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(40)
+            )
+        )
+
+        drawerScrollContent.addView(splitRatioPanel,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        drawerScrollContent.addView(createBottomPanel(),
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+outer.addView(drawerPanel, FrameLayout.LayoutParams(
             drawerWidth,
             FrameLayout.LayoutParams.MATCH_PARENT,
             Gravity.END
@@ -459,6 +552,7 @@ class MainActivity : AppCompatActivity() {
             FrameLayout.LayoutParams.MATCH_PARENT
         ))
 
+        mainRoot = outer
         setContentView(outer)
 
         measurementEngine = SeismicMeasurementEngine(
@@ -556,17 +650,17 @@ class MainActivity : AppCompatActivity() {
                 secondaryWebView.restoreState(it)
             }
             setSplitEnabled(savedInstanceState.getBoolean("split_enabled", false))
-            if (webView.url.isNullOrBlank()) {
-                webView.loadUrl(monitorPageSource.startPageUrl)
-            }
-        } else {
-            webView.loadUrl(monitorPageSource.startPageUrl)
+        }
+
+        if (savedInstanceState?.getBoolean("csv_history_visible") == true) {
+            showRecordingList()
         }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun createBrowserWebView(isMonitor: Boolean): WebView {
         return WebView(this).apply {
+            setBackgroundColor(m3Background)
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.loadsImagesAutomatically = true
@@ -578,11 +672,18 @@ class MainActivity : AppCompatActivity() {
             webChromeClient = WebChromeClient()
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
-                    if (isMonitor) hideError()
-                    if (!isMonitor && !url.isNullOrBlank() &&
-                        ::browserUrlInput.isInitialized
+                   if (isMonitor) hideError()
+
+                    if (!url.isNullOrBlank() &&
+                        (url.startsWith("http://") || url.startsWith("https://"))
                     ) {
-                        browserUrlInput.setText(url)
+                        if (isMonitor && ::primaryBrowserUrlInput.isInitialized) {
+                            primaryBrowserUrlInput.setText(url)
+                        } else if (!isMonitor &&
+                            ::secondaryBrowserUrlInput.isInitialized
+                        ) {
+                            secondaryBrowserUrlInput.setText(url)
+                        }
                     }
                 }
 
@@ -607,27 +708,147 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+   private fun createBrowserUrlBar(isPrimary: Boolean): LinearLayout {
+        val input = TextInputEditText(this).apply {
+            typeface = appTypeface
+            textSize = 14f
+            setSingleLine(true)
+            hint = "https://example.com"
+            setTextColor(m3OnSurface)
+            setHintTextColor(m3OnSurfaceVariant)
+            inputType = InputType.TYPE_CLASS_TEXT or
+                InputType.TYPE_TEXT_VARIATION_URI
+            imeOptions = EditorInfo.IME_ACTION_GO
+            setPadding(dp(4), 0, dp(4), 0)
+            setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == EditorInfo.IME_ACTION_GO) {
+                    if (isPrimary) loadPrimaryUrl() else loadSecondaryUrl()
+                    true
+                } else false
+            }
+        }
+
+        if (isPrimary) {
+            primaryBrowserUrlInput = input
+        } else {
+            secondaryBrowserUrlInput = input
+        }
+
+        val urlLayout = TextInputLayout(this).apply {
+            boxBackgroundMode = TextInputLayout.BOX_BACKGROUND_OUTLINE
+            hint = "URL"
+            setHintTextColor(ColorStateList.valueOf(m3OnSurfaceVariant))
+            setBoxStrokeColorStateList(
+                ColorStateList(
+                    arrayOf(
+                        intArrayOf(android.R.attr.state_focused),
+                        intArrayOf()
+                    ),
+                    intArrayOf(m3Primary, m3Outline)
+                )
+            )
+            setBoxStrokeWidth(dp(1))
+            setBoxStrokeWidthFocused(dp(2))
+            setBoxCornerRadii(
+                dp(12).toFloat(), dp(12).toFloat(),
+                dp(12).toFloat(), dp(12).toFloat()
+            )
+            addView(input, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.MATCH_PARENT
+            ))
+        }
+
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+
+            addView(urlLayout, LinearLayout.LayoutParams(0, dp(56), 1f))
+
+            addView(createMaterialButton("開く", ButtonTone.PRIMARY).apply {
+                setOnClickListener {
+                    if (isPrimary) loadPrimaryUrl() else loadSecondaryUrl()
+                }
+            }, LinearLayout.LayoutParams(dp(76), dp(44)).apply {
+                leftMargin = dp(8)
+            })
+        }
+
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+
+            addView(text(
+                if (isPrimary) "上段ブラウザ" else "下段ブラウザ",
+                11f,
+                true
+            ).apply {
+                setTextColor(m3OnSurfaceVariant)
+                setPadding(dp(2), dp(5), 0, dp(2))
+            })
+
+            addView(row)
+
+            if (!isPrimary) visibility = View.GONE
+        }
+    }
+
+    private fun loadPrimaryUrl() {
+        loadBrowserUrl(primaryBrowserUrlInput, webView)
+    }
+
     private fun loadSecondaryUrl() {
-        var address = browserUrlInput.text.toString().trim()
+        loadBrowserUrl(secondaryBrowserUrlInput, secondaryWebView)
+    }
+
+    private fun loadBrowserUrl(input: EditText, target: WebView) {
+        var address = input.text.toString().trim()
+
         if (address.isBlank()) {
             showMessage("URLを入力してください")
             return
         }
-        if (!address.contains("://")) address = "https://$address"
+
+        if (!address.contains("://")) {
+            address = "https://$address"
+        }
 
         val uri = runCatching { Uri.parse(address) }.getOrNull()
-        if (uri == null || (uri.scheme != "http" && uri.scheme != "https") ||
+
+        if (uri == null ||
+            (uri.scheme != "http" && uri.scheme != "https") ||
             uri.host.isNullOrBlank()
         ) {
             showMessage("http:// または https:// のURLを入力してください")
             return
         }
 
-        browserUrlInput.setText(address)
-        secondaryWebView.loadUrl(uri.toString())
-        val imm = getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
-        imm.hideSoftInputFromWindow(browserUrlInput.windowToken, 0)
-        browserUrlInput.clearFocus()
+        input.setText(address)
+        target.loadUrl(uri.toString())
+
+        val imm = getSystemService(INPUT_METHOD_SERVICE)
+            as android.view.inputmethod.InputMethodManager
+
+        imm.hideSoftInputFromWindow(input.windowToken, 0)
+        input.clearFocus()
+    }
+
+    private fun applySplitRatio() {
+        if (!::webView.isInitialized || !::secondaryWebView.isInitialized) return
+
+        val primaryParams = webView.layoutParams as LinearLayout.LayoutParams
+        val secondaryParams = secondaryWebView.layoutParams as LinearLayout.LayoutParams
+
+        primaryParams.height = 0
+        secondaryParams.height = 0
+
+        primaryParams.weight =
+            if (splitEnabled) topSplitRatio / 100f else 1f
+
+        secondaryParams.weight =
+            if (splitEnabled) (100f - topSplitRatio) / 100f else 0f
+
+        webView.layoutParams = primaryParams
+        secondaryWebView.layoutParams = secondaryParams
     }
 
     private fun setSplitEnabled(enabled: Boolean) {
@@ -639,21 +860,7 @@ class MainActivity : AppCompatActivity() {
         splitToggleButton.text =
             if (enabled) "分割ブラウザを閉じる" else "分割ブラウザを表示"
 
-        val primaryParams = webView.layoutParams as LinearLayout.LayoutParams
-        val secondaryParams = secondaryWebView.layoutParams as LinearLayout.LayoutParams
-        if (enabled) {
-            primaryParams.height = 0
-            primaryParams.weight = 1f
-            secondaryParams.height = 0
-            secondaryParams.weight = 1f
-        } else {
-            primaryParams.height = 0
-            primaryParams.weight = 1f
-            secondaryParams.height = 0
-            secondaryParams.weight = 0f
-        }
-        webView.layoutParams = primaryParams
-        secondaryWebView.layoutParams = secondaryParams
+        applySplitRatio()
     }
 
     private fun createTopPanel(): MaterialCardView {
@@ -898,17 +1105,146 @@ class MainActivity : AppCompatActivity() {
         })
         panel.addView(buttons)
 
-        val settingsButton = createMaterialButton("自動記録設定", ButtonTone.OUTLINED).apply {
-            setOnClickListener { showAutoRecordingSettings() }
-        }
-        panel.addView(settingsButton, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, dp(44)
-        ).apply {
-            topMargin = dp(8)
-        })
-
+        panel.addView(createAutoRecordingControls(),
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(12)
+            }
+        )
         return panel
     }
+    private fun createAutoRecordingControls(): LinearLayout {
+        val levels = IntensityClass.values()
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8), dp(10), dp(8), dp(8))
+            background = roundedBackground(m3SurfaceContainer, dp(16))
+        }
+
+        container.addView(text("自動記録", 13f, true).apply {
+            setTextColor(m3Primary)
+            setPadding(dp(4), 0, 0, dp(8))
+        })
+
+        autoStartLabel = text(
+            "開始震度: ${autoStartIntensity.label}",
+            12f,
+            true
+        ).apply {
+            setTextColor(m3OnSurface)
+            setPadding(dp(4), dp(2), 0, 0)
+        }
+        container.addView(autoStartLabel)
+
+        container.addView(text("終了震度より高い階級", 10f).apply {
+            setTextColor(m3OnSurfaceVariant)
+            setPadding(dp(4), 0, 0, 0)
+        })
+
+        autoStartSlider = Slider(this).apply {
+            valueFrom = 1f
+            valueTo = levels.lastIndex.toFloat()
+            stepSize = 1f
+            value = autoStartIntensity.ordinal.toFloat()
+            contentDescription = "自動記録の開始震度"
+        }
+        container.addView(autoStartSlider,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(44)
+            )
+        )
+
+        autoStopLabel = text(
+            "終了震度: ${autoStopIntensity.label}",
+            12f,
+            true
+        ).apply {
+            setTextColor(m3OnSurface)
+            setPadding(dp(4), dp(5), 0, 0)
+        }
+        container.addView(autoStopLabel)
+
+        container.addView(text("開始震度より低い階級", 10f).apply {
+            setTextColor(m3OnSurfaceVariant)
+            setPadding(dp(4), 0, 0, 0)
+        })
+
+        autoStopSlider = Slider(this).apply {
+            valueFrom = 0f
+            valueTo = (levels.lastIndex - 1).toFloat()
+            stepSize = 1f
+            value = autoStopIntensity.ordinal.toFloat()
+            contentDescription = "自動記録の終了震度"
+        }
+        container.addView(autoStopSlider,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(44)
+            )
+        )
+
+        autoStartSlider.addOnChangeListener { _, value, fromUser ->
+            if (!fromUser || updatingAutoSliders) return@addOnChangeListener
+
+            updatingAutoSliders = true
+            try {
+                autoStartIntensity = levels[
+                    value.toInt().coerceIn(1, levels.lastIndex)
+                ]
+
+                if (autoStopIntensity.ordinal >= autoStartIntensity.ordinal) {
+                    autoStopIntensity = levels[autoStartIntensity.ordinal - 1]
+                    autoStopSlider.value = autoStopIntensity.ordinal.toFloat()
+                }
+
+                updateAutoRecordingLabels()
+                saveAutoRecordingSettings()
+            } finally {
+                updatingAutoSliders = false
+            }
+        }
+
+        autoStopSlider.addOnChangeListener { _, value, fromUser ->
+            if (!fromUser || updatingAutoSliders) return@addOnChangeListener
+
+            updatingAutoSliders = true
+            try {
+                autoStopIntensity = levels[
+                    value.toInt().coerceIn(0, levels.lastIndex - 1)
+                ]
+
+                if (autoStopIntensity.ordinal >= autoStartIntensity.ordinal) {
+                    autoStartIntensity = levels[autoStopIntensity.ordinal + 1]
+                    autoStartSlider.value = autoStartIntensity.ordinal.toFloat()
+                }
+
+                updateAutoRecordingLabels()
+                saveAutoRecordingSettings()
+            } finally {
+                updatingAutoSliders = false
+            }
+        }
+
+        return container
+    }
+
+    private fun updateAutoRecordingLabels() {
+        autoStartLabel.text = "開始震度: ${autoStartIntensity.label}"
+        autoStopLabel.text = "終了震度: ${autoStopIntensity.label}"
+    }
+
+    private fun saveAutoRecordingSettings() {
+        getSharedPreferences("auto_recording", MODE_PRIVATE)
+            .edit()
+            .putInt("start_intensity", autoStartIntensity.ordinal)
+            .putInt("stop_intensity", autoStopIntensity.ordinal)
+            .apply()
+    }
+
     private enum class ButtonTone { PRIMARY, TONAL, OUTLINED, TEXT }
 
     private fun createMaterialButton(label: String, tone: ButtonTone): MaterialButton {
@@ -1268,129 +1604,537 @@ private fun updateAutomaticRecording(sample: ProcessedSample) {
         showMessage("CSV記録を停止しました")
     }
 
-    private fun showAutoRecordingSettings() {
-        val levels = IntensityClass.values()
-        val labels = levels.map { it.label }.toTypedArray()
-
-        AlertDialog.Builder(this)
-            .setTitle("自動記録の開始震度")
-            .setSingleChoiceItems(
-                labels,
-                autoStartIntensity.ordinal
-            ) { dialog, which ->
-                val selected = levels[which]
-
-                if (selected.ordinal <= autoStopIntensity.ordinal) {
-                    showMessage("開始震度は終了震度より高くしてください")
-                    return@setSingleChoiceItems
-                }
-
-                autoStartIntensity = selected
-                dialog.dismiss()
-                showAutoStopIntensitySettings()
-            }
-            .setNegativeButton("キャンセル", null)
-            .show()
-    }
-
-    private fun showAutoStopIntensitySettings() {
-        val levels = IntensityClass.values()
-        val labels = levels.map { it.label }.toTypedArray()
-
-        AlertDialog.Builder(this)
-            .setTitle("自動記録の終了震度")
-            .setSingleChoiceItems(
-                labels,
-                autoStopIntensity.ordinal
-            ) { dialog, which ->
-                val selected = levels[which]
-
-                if (selected.ordinal >= autoStartIntensity.ordinal) {
-                    showMessage("終了震度は開始震度より低くしてください")
-                    return@setSingleChoiceItems
-                }
-
-                autoStopIntensity = selected
-
-                getSharedPreferences("auto_recording", MODE_PRIVATE)
-                    .edit()
-                    .putInt("start_intensity", autoStartIntensity.ordinal)
-                    .putInt("stop_intensity", autoStopIntensity.ordinal)
-                    .apply()
-
-                dialog.dismiss()
-                showMessage(
-                    "自動記録設定: 開始 ${autoStartIntensity.label} / 終了 ${autoStopIntensity.label}"
-                )
-            }
-            .setNegativeButton("キャンセル", null)
-            .show()
-    }
     private fun showRecordingList() {
-        val recordings = runCatching {
-            synchronized(recorderLock) { csvRecorder.listRecordingsWithStats() }
-        }.getOrDefault(emptyList())
+        csvHistoryVisible = true
+
+        val screen = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(m3Background)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+
+        // ヘッダーカード
+        val headerCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(13))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#152239"))
+                cornerRadius = dp(16).toFloat()
+                setStroke(dp(1), Color.parseColor("#3A527D"))
+            }
+        }
+
+        headerCard.addView(text("計測記録一覧", 20f, true).apply {
+            setTextColor(m3OnSurface)
+        })
+
+        headerCard.addView(text(
+            "記録をタップするとCSVを書き出せます。右端の削除ボタンから個別に削除できます。",
+            12f
+        ).apply {
+            setTextColor(m3OnSurfaceVariant)
+            setPadding(0, dp(7), 0, dp(10))
+        })
+
+        val statusText = text("読み込み中…", 13f, true).apply {
+            setTextColor(m3Primary)
+        }
+        csvHistoryStatusText = statusText
+        headerCard.addView(statusText)
+
+        screen.addView(headerCard, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
+
+        // スクロールする記録一覧
+        val listContent = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(1), dp(3), dp(1), dp(12))
+        }
+        csvHistoryListContent = listContent
+
+        val scrollView = ScrollView(this).apply {
+            isFillViewport = true
+            clipToPadding = false
+            addView(
+                listContent,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+
+        screen.addView(scrollView, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            0,
+            1f
+        ).apply {
+            topMargin = dp(9)
+        })
+
+        // 下部ボタン
+        val footer = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        footer.addView(
+            createMaterialButton("更新", ButtonTone.TONAL).apply {
+                setOnClickListener { loadRecordingList() }
+            },
+            LinearLayout.LayoutParams(0, dp(46), 1f).apply {
+                rightMargin = dp(5)
+            }
+        )
+
+        footer.addView(
+            createMaterialButton("戻る", ButtonTone.OUTLINED).apply {
+                setOnClickListener { returnToMainScreen() }
+            },
+            LinearLayout.LayoutParams(0, dp(46), 1f).apply {
+                leftMargin = dp(5)
+            }
+        )
+
+        screen.addView(footer, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            dp(46)
+        ).apply {
+            topMargin = dp(8)
+        })
+
+        setContentView(screen)
+        hideSystemBars()
+        loadRecordingList()
+    }
+
+    private fun loadRecordingList(successMessage: String? = null) {
+        val statusView = csvHistoryStatusText ?: return
+
+        statusView.text = if (successMessage == null) {
+            "読み込み中…"
+        } else {
+            "$successMessage　読み込み中…"
+        }
+
+        csvHistoryListContent?.removeAllViews()
+
+        csvHistoryExecutor.execute {
+            val result = runCatching {
+                synchronized(recorderLock) {
+                    csvRecorder.listRecordingsWithStats()
+                }
+            }
+
+            runOnUiThread {
+                if (isDestroyed || isFinishing || !csvHistoryVisible) {
+                    return@runOnUiThread
+                }
+
+                val currentStatus = csvHistoryStatusText ?: return@runOnUiThread
+
+                if (result.isFailure) {
+                    currentStatus.text = "記録の読み込みに失敗しました"
+                    return@runOnUiThread
+                }
+
+                val recordings = result.getOrNull() ?: emptyList()
+
+                val countMessage = if (recordings.isEmpty()) {
+                    "記録はありません"
+                } else {
+                    "${recordings.size}件の記録があります（新しい日付順）"
+                }
+
+                currentStatus.text = if (successMessage == null) {
+                    countMessage
+                } else {
+                    "$successMessage　$countMessage"
+                }
+
+                renderRecordingList(recordings)
+            }
+        }
+    }
+
+    private fun renderRecordingList(
+        recordings: List<CsvRecorder.RecordingInfo>
+    ) {
+        val listContent = csvHistoryListContent ?: return
+        listContent.removeAllViews()
 
         if (recordings.isEmpty()) {
-            showMessage("保存済みのCSVはありません")
+            listContent.addView(text(
+                "保存された計測記録はありません",
+                13f
+            ).apply {
+                setTextColor(m3OnSurfaceVariant)
+                gravity = Gravity.CENTER
+                setPadding(dp(12), dp(36), dp(12), dp(36))
+            })
             return
         }
 
-        val labels = recordings.map { info ->
-            val date = info.startDateTime ?: info.file.name
-            val intensity = info.maxMeasuredIntensity?.let {
-                String.format(Locale.US, "震度相当 %.2f", it)
-            } ?: "震度相当 --"
-            "$date\n$intensity / ${info.sampleCount} samples"
-        }.toTypedArray()
+        val grouped = recordings.groupBy {
+            formatHistoryTime(recordingTimestampMillis(it), "yyyy/MM/dd")
+        }
 
-        AlertDialog.Builder(this)
-            .setTitle("記録一覧")
-            .setItems(labels) { _, index ->
-                showRecordingActions(recordings[index])
+        grouped.keys.sortedDescending().forEach { date ->
+            val dateHeader = text(date, 14f, true).apply {
+                setTextColor(Color.parseColor("#E4ECFA"))
+                setPadding(dp(12), dp(9), dp(12), dp(9))
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#1B2D4D"))
+                    cornerRadius = dp(10).toFloat()
+                    setStroke(dp(1), Color.parseColor("#3A527D"))
+                }
             }
-            .setNegativeButton("閉じる", null)
-            .show()
+
+            listContent.addView(dateHeader, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(9)
+                bottomMargin = dp(6)
+            })
+
+            grouped[date]
+                .orEmpty()
+                .sortedByDescending { recordingTimestampMillis(it) }
+                .forEach { info ->
+                    listContent.addView(
+                        createRecordingCard(info),
+                        LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            bottomMargin = dp(8)
+                        }
+                    )
+                }
+        }
     }
 
-    private fun showRecordingActions(info: CsvRecorder.RecordingInfo) {
-        val details = buildString {
-            appendLine("サンプル数: ${info.sampleCount}")
-            appendLine("ファイルサイズ: ${info.sizeBytes} bytes")
-            appendLine("最大震度: ${info.maxIntensityClass}")
-            info.startDateTime?.let {
-                appendLine("開始日時: $it")
+    private fun recordingTimestampMillis(
+        info: CsvRecorder.RecordingInfo
+    ): Long {
+        val startTime = info.startDateTime?.let { value ->
+            runCatching {
+                java.time.OffsetDateTime.parse(value)
+                    .toInstant()
+                    .toEpochMilli()
+            }.getOrNull()
+        }
+
+        return startTime ?: info.lastModified
+    }
+
+    private fun formatHistoryTime(
+        timestampMillis: Long,
+        pattern: String
+    ): String {
+        return java.text.SimpleDateFormat(pattern, Locale.JAPAN)
+            .format(java.util.Date(timestampMillis))
+    }
+
+    private fun recordingCardBackground(cls: IntensityClass?): Int {
+        return Color.parseColor(
+            when (cls) {
+                IntensityClass.LEVEL_0 -> "#304765"
+                IntensityClass.LEVEL_1 -> "#1C465A"
+                IntensityClass.LEVEL_2 -> "#1F3866"
+                IntensityClass.LEVEL_3 -> "#3C6748"
+                IntensityClass.LEVEL_4 -> "#716614"
+                IntensityClass.LEVEL_5_LOWER -> "#76502D"
+                IntensityClass.LEVEL_5_UPPER -> "#713A27"
+                IntensityClass.LEVEL_6_LOWER -> "#792D29"
+                IntensityClass.LEVEL_6_UPPER -> "#5C202C"
+                IntensityClass.LEVEL_7 -> "#4F286F"
+                null -> "#304765"
+            }
+        )
+    }
+
+    private fun createRecordingCard(
+        info: CsvRecorder.RecordingInfo
+    ): LinearLayout {
+        val cls = IntensityClass.values().firstOrNull {
+            it.label == info.maxIntensityClass
+        }
+
+        val badgeColors = cls?.let {
+            IntensityClassColors.colorsFor(it)
+        }
+
+        val intensityText = info.maxMeasuredIntensity
+            ?.takeIf { it.isFinite() }
+            ?.let { String.format(Locale.US, "%.2f", it) }
+            ?: "--"
+
+        val accelerationText = info.maxFilteredAccelerationGal
+            ?.takeIf { it.isFinite() }
+            ?.let { String.format(Locale.US, "%.1f", it) }
+            ?: "--"
+
+        val timestamp = recordingTimestampMillis(info)
+        val dateTimeText = formatHistoryTime(
+            timestamp,
+            "yyyy/M/d HH:mm:ss"
+        )
+
+        val fileSizeKb = String.format(
+            Locale.US,
+            "%.1f",
+            info.sizeBytes / 1024.0
+        )
+
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(9), dp(9), dp(8), dp(9))
+            background = GradientDrawable().apply {
+                setColor(recordingCardBackground(cls))
+                cornerRadius = dp(14).toFloat()
+                setStroke(dp(1), Color.parseColor("#526686"))
+            }
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { requestCsvExport(info) }
+        }
+
+        // 左側64dp階級バッジ
+        val badge = TextView(this).apply {
+            text = cls?.label ?: "--"
+            textSize = 21f
+            typeface = Typeface.create(appTypeface, Typeface.BOLD)
+            includeFontPadding = false
+            gravity = Gravity.CENTER
+            setTextColor(badgeColors?.text ?: Color.WHITE)
+            background = GradientDrawable().apply {
+                setColor(
+                    badgeColors?.background ?: Color.parseColor("#526686")
+                )
+                cornerRadius = dp(11).toFloat()
+                setStroke(
+                    dp(1),
+                    badgeColors?.border ?: Color.parseColor("#AAB7C8")
+                )
             }
         }
 
-        AlertDialog.Builder(this)
-            .setTitle("記録データ")
-            .setMessage(details)
-            .setPositiveButton("CSV再生") { _, _ ->
-                startPlayback(info.file)
-            }
-            .setNeutralButton("CSVを書き出す") { _, _ ->
+        card.addView(badge, LinearLayout.LayoutParams(dp(64), dp(64)))
+
+        // 中央の2行
+        val dataColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(9), 0, dp(5), 0)
+        }
+
+        dataColumn.addView(text(
+            dateTimeText,
+            12.5f,
+            true
+        ).apply {
+            setTextColor(Color.parseColor("#DDE7F6"))
+        })
+
+        dataColumn.addView(text(
+            "計測震度 $intensityText",
+            15f,
+            true
+        ).apply {
+            setTextColor(Color.parseColor("#FFFFFF"))
+            setPadding(0, dp(3), 0, 0)
+        })
+
+        dataColumn.addView(text(
+            "フィルター後加速度 ${accelerationText} gal",
+            12f
+        ).apply {
+            setTextColor(Color.parseColor("#E1E8F2"))
+            setPadding(0, dp(2), 0, 0)
+        })
+
+        dataColumn.addView(text(
+            "サンプル数 ${info.sampleCount} ・ ${fileSizeKb} KB",
+            11.5f
+        ).apply {
+            setTextColor(Color.parseColor("#D4DCE8"))
+            setPadding(0, dp(3), 0, 0)
+        })
+
+        card.addView(dataColumn, LinearLayout.LayoutParams(
+            0,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            1f
+        ))
+
+        // 右側の再生・削除ボタン
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+        }
+
+        val playButton = MaterialButton(this).apply {
+            text = "再生"
+            typeface = appTypeface
+            isAllCaps = false
+            textSize = 12f
+            cornerRadius = dp(9)
+            insetTop = 0
+            insetBottom = 0
+            minimumHeight = dp(34)
+            setPadding(dp(2), 0, dp(2), 0)
+            backgroundTintList = ColorStateList.valueOf(
+                Color.parseColor("#8FA7E8")
+            )
+            setTextColor(Color.parseColor("#18243B"))
+            setOnClickListener { playRecordingFromHistory(info) }
+        }
+
+        actions.addView(playButton, LinearLayout.LayoutParams(
+            dp(62),
+            dp(34)
+        ))
+
+        val deleteButton = MaterialButton(this).apply {
+            text = "削除"
+            typeface = appTypeface
+            isAllCaps = false
+            textSize = 12f
+            cornerRadius = dp(9)
+            insetTop = 0
+            insetBottom = 0
+            minimumHeight = dp(32)
+            setPadding(dp(2), 0, dp(2), 0)
+            backgroundTintList = ColorStateList.valueOf(
+                Color.parseColor("#493943")
+            )
+            setTextColor(Color.parseColor("#F5E9EC"))
+            contentDescription = "この記録を削除"
+            setOnClickListener { confirmDeleteRecording(info) }
+        }
+
+        actions.addView(deleteButton, LinearLayout.LayoutParams(
+            dp(62),
+            dp(32)
+        ).apply {
+            topMargin = dp(5)
+        })
+
+        card.addView(actions)
+
+        return card
+    }
+
+    private fun requestCsvExport(info: CsvRecorder.RecordingInfo) {
+        csvHistoryStatusText?.text = "保存先を選択してください"
+
+        csvHistoryExecutor.execute {
+            val exists = info.file.isFile
+
+            runOnUiThread {
+                if (isDestroyed || isFinishing || !csvHistoryVisible) {
+                    return@runOnUiThread
+                }
+
+                if (!exists) {
+                    csvHistoryStatusText?.text =
+                        "この記録は既に削除されています。更新してください。"
+                    return@runOnUiThread
+                }
+
                 selectedExportFile = info.file
                 createCsvDocument.launch(info.file.name)
             }
-            .setNegativeButton("削除") { _, _ ->
-                AlertDialog.Builder(this)
-                    .setMessage("この記録を削除しますか？")
-                    .setPositiveButton("削除") { _, _ ->
-                        val deleted = synchronized(recorderLock) {
-                            csvRecorder.deleteRecording(info.file)
-                        }
-                        showMessage(
-                            if (deleted) "削除しました"
-                            else "削除に失敗しました"
-                        )
-                    }
-                    .setNegativeButton("キャンセル", null)
-                    .show()
+        }
+    }
+
+    private fun playRecordingFromHistory(info: CsvRecorder.RecordingInfo) {
+        csvHistoryStatusText?.text = "再生準備中…"
+
+        csvHistoryExecutor.execute {
+            val exists = info.file.isFile
+
+            runOnUiThread {
+                if (isDestroyed || isFinishing || !csvHistoryVisible) {
+                    return@runOnUiThread
+                }
+
+                if (!exists) {
+                    csvHistoryStatusText?.text =
+                        "この記録は既に削除されています。更新してください。"
+                    return@runOnUiThread
+                }
+
+                returnToMainScreen()
+                startPlayback(info.file)
             }
+        }
+    }
+
+    private fun confirmDeleteRecording(info: CsvRecorder.RecordingInfo) {
+        AlertDialog.Builder(this)
+            .setTitle("記録の削除")
+            .setMessage(
+                "この記録を削除しますか？\nCSVと付随する記録情報を削除します。この操作は元に戻せません。"
+            )
+            .setPositiveButton("削除") { _, _ ->
+                csvHistoryStatusText?.text = "削除中…"
+
+                csvHistoryExecutor.execute {
+                    val existedBefore = info.file.isFile
+                    val deleted = if (existedBefore) {
+                        runCatching {
+                            synchronized(recorderLock) {
+                                csvRecorder.deleteRecording(info.file)
+                            }
+                        }.getOrDefault(false)
+                    } else {
+                        false
+                    }
+
+                    val missingAfter = !info.file.isFile
+
+                    runOnUiThread {
+                        if (isDestroyed || isFinishing || !csvHistoryVisible) {
+                            return@runOnUiThread
+                        }
+
+                        when {
+                            !existedBefore || (!deleted && missingAfter) -> {
+                                csvHistoryStatusText?.text =
+                                    "この記録は既に削除されています。更新してください。"
+                            }
+
+                            deleted -> {
+                                loadRecordingList("削除しました")
+                            }
+
+                            else -> {
+                                csvHistoryStatusText?.text = "削除に失敗しました"
+                            }
+                        }
+                    }
+                }
+            }
+            .setNegativeButton("キャンセル", null)
             .show()
     }
 
+    private fun returnToMainScreen() {
+        if (!csvHistoryVisible || !::mainRoot.isInitialized) return
+
+        csvHistoryVisible = false
+        csvHistoryStatusText = null
+        csvHistoryListContent = null
+
+        setContentView(mainRoot)
+        hideSystemBars()
+    }
     private fun startPlayback(file: File) {
         if (isMeasuring) {
             showMessage("再生するには計測を停止してください")
@@ -1655,11 +2399,18 @@ private fun updateAutomaticRecording(sample: ProcessedSample) {
             outState.putBundle("secondary_webview_state", secondaryState)
         }
         outState.putBoolean("split_enabled", splitEnabled)
+        outState.putFloat("split_ratio", topSplitRatio)
+        outState.putBoolean("csv_history_visible", csvHistoryVisible)
         super.onSaveInstanceState(outState)
     }
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
+        if (csvHistoryVisible) {
+            returnToMainScreen()
+            return
+        }
+
         if (::secondaryWebView.isInitialized &&
             secondaryWebView.visibility == View.VISIBLE &&
             secondaryWebView.canGoBack()
@@ -1676,6 +2427,7 @@ private fun updateAutomaticRecording(sample: ProcessedSample) {
         stopPlayback()
         isDestroyed = true
         handler.removeCallbacksAndMessages(null)
+        csvHistoryExecutor.shutdown()
         if (::measurementEngine.isInitialized) measurementEngine.stop()
         if (::networkMonitor.isInitialized) networkMonitor.stop()
         synchronized(recorderLock) { csvRecorder.stop() }

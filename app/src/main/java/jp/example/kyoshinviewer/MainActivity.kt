@@ -223,8 +223,8 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        topSplitRatio = savedInstanceState?.getFloat("split_ratio", 50f)
-            ?.coerceIn(10f, 90f) ?: 50f
+        val browserPrefs = getSharedPreferences("browser_settings", MODE_PRIVATE)
+        topSplitRatio = browserPrefs.getFloat("split_ratio", 50f).coerceIn(10f, 90f)
         supportActionBar?.hide()
         hideSystemBars()
 
@@ -450,6 +450,10 @@ class MainActivity : AppCompatActivity() {
 
             addOnChangeListener { _, value, _ ->
                 topSplitRatio = value
+                getSharedPreferences("browser_settings", MODE_PRIVATE)
+                    .edit()
+                    .putFloat("split_ratio", value)
+                    .apply()
                 splitRatioLabel.text =
                     "上段 ${value.toInt()}% / 下段 ${(100f - value).toInt()}%"
 
@@ -478,6 +482,17 @@ class MainActivity : AppCompatActivity() {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
+        )
+        drawerScrollContent.addView(
+            createMaterialButton("設定を初期化", ButtonTone.OUTLINED).apply {
+                setOnClickListener { showResetSettingsDialog() }
+            },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(48)
+            ).apply {
+                setMargins(dp(8), dp(12), dp(8), dp(16))
+            }
         )
 outer.addView(drawerPanel, FrameLayout.LayoutParams(
             drawerWidth,
@@ -649,7 +664,23 @@ outer.addView(drawerPanel, FrameLayout.LayoutParams(
             savedInstanceState.getBundle("secondary_webview_state")?.let {
                 secondaryWebView.restoreState(it)
             }
-            setSplitEnabled(savedInstanceState.getBoolean("split_enabled", false))
+            setSplitEnabled(browserPrefs.getBoolean("split_enabled", false))
+        } else {
+            setSplitEnabled(browserPrefs.getBoolean("split_enabled", false))
+
+            browserPrefs.getString("primary_url", null)
+                ?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+                ?.let { savedUrl ->
+                    primaryBrowserUrlInput.setText(savedUrl)
+                    webView.loadUrl(savedUrl)
+                }
+
+            browserPrefs.getString("secondary_url", null)
+                ?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+                ?.let { savedUrl ->
+                    secondaryBrowserUrlInput.setText(savedUrl)
+                    secondaryWebView.loadUrl(savedUrl)
+                }
         }
 
         if (savedInstanceState?.getBoolean("csv_history_visible") == true) {
@@ -684,6 +715,14 @@ outer.addView(drawerPanel, FrameLayout.LayoutParams(
                         ) {
                             secondaryBrowserUrlInput.setText(url)
                         }
+
+                        getSharedPreferences("browser_settings", MODE_PRIVATE)
+                            .edit()
+                            .putString(
+                                if (isMonitor) "primary_url" else "secondary_url",
+                                url
+                            )
+                            .apply()
                     }
                 }
 
@@ -825,6 +864,12 @@ outer.addView(drawerPanel, FrameLayout.LayoutParams(
         input.setText(address)
         target.loadUrl(uri.toString())
 
+        val urlKey = if (target === webView) "primary_url" else "secondary_url"
+        getSharedPreferences("browser_settings", MODE_PRIVATE)
+            .edit()
+            .putString(urlKey, uri.toString())
+            .apply()
+
         val imm = getSystemService(INPUT_METHOD_SERVICE)
             as android.view.inputmethod.InputMethodManager
 
@@ -853,6 +898,11 @@ outer.addView(drawerPanel, FrameLayout.LayoutParams(
 
     private fun setSplitEnabled(enabled: Boolean) {
         splitEnabled = enabled
+        getSharedPreferences("browser_settings", MODE_PRIVATE)
+            .edit()
+            .putBoolean("split_enabled", enabled)
+            .apply()
+
         if (!::secondaryBrowserBar.isInitialized) return
 
         secondaryBrowserBar.visibility = if (enabled) View.VISIBLE else View.GONE
@@ -1243,6 +1293,79 @@ outer.addView(drawerPanel, FrameLayout.LayoutParams(
             .putInt("start_intensity", autoStartIntensity.ordinal)
             .putInt("stop_intensity", autoStopIntensity.ordinal)
             .apply()
+    }
+
+    private fun showResetSettingsDialog() {
+        android.app.AlertDialog.Builder(this)
+            .setTitle("設定を初期化")
+            .setMessage(
+                "ブラウザのURL、分割表示・分割比率、自動記録の開始・終了震度を初期値に戻します。\n\nCSV記録ファイルと記録履歴は削除しません。"
+            )
+            .setNegativeButton("キャンセル", null)
+            .setPositiveButton("初期化") { _, _ ->
+                resetAppSettings()
+            }
+            .show()
+    }
+
+    private fun resetAppSettings() {
+        // 設定情報だけを消去。CSVファイルには触れない。
+        getSharedPreferences("browser_settings", MODE_PRIVATE)
+            .edit()
+            .clear()
+            .apply()
+
+        getSharedPreferences("auto_recording", MODE_PRIVATE)
+            .edit()
+            .clear()
+            .apply()
+
+        // ブラウザURLを初期化
+        primaryBrowserUrlInput.setText("")
+        secondaryBrowserUrlInput.setText("")
+
+        if (::webView.isInitialized) {
+            webView.stopLoading()
+            webView.loadUrl("about:blank")
+        }
+
+        if (::secondaryWebView.isInitialized) {
+            secondaryWebView.stopLoading()
+            secondaryWebView.loadUrl("about:blank")
+        }
+
+        // 分割設定を初期値に戻す
+        topSplitRatio = 50f
+        setSplitEnabled(false)
+        splitRatioSlider.value = 50f
+        splitRatioLabel.text = "上段 50% / 下段 50%"
+
+        // 自動記録の震度条件を初期値に戻す
+        autoStartIntensity = IntensityClass.LEVEL_2
+        autoStopIntensity = IntensityClass.LEVEL_0
+
+        updatingAutoSliders = true
+        try {
+            autoStartSlider.value = autoStartIntensity.ordinal.toFloat()
+            autoStopSlider.value = autoStopIntensity.ordinal.toFloat()
+        } finally {
+            updatingAutoSliders = false
+        }
+
+        updateAutoRecordingLabels()
+
+        // 初期値を保存
+        saveAutoRecordingSettings()
+
+        getSharedPreferences("browser_settings", MODE_PRIVATE)
+            .edit()
+            .putFloat("split_ratio", 50f)
+            .putBoolean("split_enabled", false)
+            .remove("primary_url")
+            .remove("secondary_url")
+            .apply()
+
+        showMessage("設定を初期化しました。CSV記録は保持されています。")
     }
 
     private enum class ButtonTone { PRIMARY, TONAL, OUTLINED, TEXT }
@@ -2386,6 +2509,42 @@ private fun updateAutomaticRecording(sample: ProcessedSample) {
 
     private fun dp(value: Int): Int =
         (value * resources.displayMetrics.density).toInt()
+
+    private fun saveBrowserSettings() {
+        val editor = getSharedPreferences("browser_settings", MODE_PRIVATE)
+            .edit()
+            .putFloat("split_ratio", topSplitRatio)
+            .putBoolean("split_enabled", splitEnabled)
+
+        if (::webView.isInitialized) {
+            val url = webView.url
+                ?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+
+            if (url != null) {
+                editor.putString("primary_url", url)
+            } else {
+                editor.remove("primary_url")
+            }
+        }
+
+        if (::secondaryWebView.isInitialized) {
+            val url = secondaryWebView.url
+                ?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+
+            if (url != null) {
+                editor.putString("secondary_url", url)
+            } else {
+                editor.remove("secondary_url")
+            }
+        }
+
+        editor.apply()
+    }
+
+    override fun onPause() {
+        saveBrowserSettings()
+        super.onPause()
+    }
 
     override fun onSaveInstanceState(outState: Bundle) {
         if (::webView.isInitialized) {
